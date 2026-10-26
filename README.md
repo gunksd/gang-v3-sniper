@@ -197,39 +197,40 @@ pm2 logs sniper
 - 倍数按「每枚代币」计算，分批卖出后剩余部分的倍数照样可比
 - 估值已扣除卖出时的平台费和卖税；毕业后按 PancakeSwap 实际报价估值
 
-## V3 地址自动发现
+## 地址自动发现（V3 + 打新）
 
-不填地址直接 `run`，程序先等主网 V3 出现，找到后保存到 `~/.gang-sniper/config.json`，然后开始狙击。
+主网还没上线时就可以 `run` 挂着。程序同时等两个合约：V3 发射台和打新合约（FairMintPad），各自找到后各自开始。
 
-判定分两层：
+按 gang 的上线手册（`docs/MAINNET-RUNBOOK-V3-FAIR-2026-10-26.md`），两套合约由一个新的部署钱包发布，接到一个**新的**共用手续费合约上，再转给多签，链上没有能提前认出它们的已知地址。所以信任来源是 gang 自己发布的地址，再到链上核对：
 
-1. **信任锚**：主网部署脚本复用现网的平台手续费合约
-   [`0xBDDd…F111`](https://bscscan.com/address/0xBDDd8F275D7Cb65f5454D0bEDf0463792878F111)，
-   owner 是 gang 团队地址 `0x4EEd…19d3`。新发射台必须被 owner 设为 operator 才能交易（否则买入会回滚），
-   这会发出 `OperatorUpdated` 事件，**只有 owner 能发**。程序用 WSS 订阅 + HTTP 轮询盯这个事件。
-2. **合约指纹**：候选地址还必须满足 V3 独有特征才算数：
-   平台抽成 0.5%、税率范围 1%–5%、手续费合约指回同一个、税收路由和迁移合约都指回它自己、
-   Agent 门槛和 1% 上限开启、确实是 operator。
+| 来源（任意一个出现即可） | 何时出现 |
+|---|---|
+| `gang.fun/api/v3/config`、`/api/fair/config` 返回 `enabled: true` | 服务端切到新合约后 |
+| 仓库 `broadcast/<脚本>/56/run-latest.json` | 部署后提交到仓库 |
+| npm `@gangfun/cli` 新版本里的 mainnet 地址 | CLI 发布（对公众开放创建）时 |
 
-别人部署的山寨合约拿不到 operator 身份，过不了第 1 层。V2 发射台和税收路由合约同样是 operator，但过不了第 2 层。
+每个候选地址还要过链上指纹：V3 / 打新各自的常量（税率范围、10,000 份、上限 0.1%–0.5% 等）、真实 Agent ID 注册表和 WBNB、迁移合约和手续费合约都指回它自己、手续费合约的回购地址是 gang 的 GangBuybackBurner、带审计版才有的路由入口。
 
-找到之后：
+只查一下：`gang-sniper discover`（`--follow` 一直等）。手动指定：`SNIPER_PAD`（V3）、`SNIPER_FAIR_PAD`（打新）。
 
-- 从 operator 交易所在的块开始补查 `Created`（落后超过 3 个块的币不追）
-- 实盘模式下自动授权 WBNB，**额度 = 每日预算**，不做无限授权，额度不够时自动补
-- 每次启动都会重新验一遍指纹
+## 打新
 
-只想查一下，不开始狙击：
+规则：一半供应量分 10,000 份统一价认购，每个钱包最多 0.1%–0.5%，限时 1–72 小时，打满即在 PancakeSwap 开盘（开盘价 = 打新价），没打满全额退款。开盘后每笔交易 1% 税，其中一半给打新进来、持仓没跌破持仓线的地址。
 
-```bash
-gang-sniper discover            # 扫一次
-gang-sniper discover --follow   # 一直等到出现
-```
+| 设置（`fair`） | 默认 | 说明 |
+|---|---|---|
+| `maxSales` | 1 | 总共自动打几场（跨重启计数） |
+| `shares` | `cap` | 打满单钱包上限；也可以填份数 |
+| `maxSpend.wbnb` | 0.6 | 每场本金 + 打新手续费上限（合约允许的最贵一场是 0.525） |
+| `maxMintFeeBps` | 500 | 打新手续费高于这个就不打 |
+| `sellPctOnLaunch` | 50 | 开盘后立刻在 PancakeSwap 卖出的比例 |
+| `keepReward` | true | 不卖穿持仓线（跌破就永久失去持有奖励）；持仓线 50% 时卖一半正好不穿 |
+| `sellSlippagePct` | 5 | |
+| `autoRefund` | true | 到期没打满自动领回本金 + 手续费 |
 
-也可以手动指定：`SNIPER_PAD=0x…`，或写进 `~/.gang-sniper/config.json` 的 `pad`。
+流程：新一场出现 → 打满上限（快满时剩多少打多少，打满的那笔会直接开盘）→ 立刻授权代币给 PancakeSwap（锁仓期间也能授权）→ 开盘后卖出设定比例 → 剩下的拿着。
 
-> 免费公共节点只保留最近约 9000 个块（约 8 小时）的日志。程序停机超过这个时间，期间的上线事件只能靠下一次实时订阅收到；
-> 程序会记录扫描进度，停机不超过 8 小时重启不会漏。需要更长的回溯可以把 `SNIPER_RPC` 设成归档节点。
+V3 狙击和打新共用钱包里的 WBNB：打新的钱要等开盘或退款才回来，期间 V3 可能因余额不足跳过。
 
 ## 风控
 
@@ -288,7 +289,7 @@ gang-sniper discover --follow   # 一直等到出现
 | 变量 | 作用 |
 |---|---|
 | `SNIPER_DATA_DIR` | 数据目录，默认 `~/.gang-sniper` |
-| `SNIPER_PAD` | 手动指定 V3 地址 |
+| `SNIPER_PAD` / `SNIPER_FAIR_PAD` | 手动指定 V3 / 打新合约地址 |
 | `SNIPER_WSS` | WSS 节点，可逗号分隔多个，同时订阅、谁先到用谁。默认 `wss://bsc-rpc.publicnode.com` |
 | `SNIPER_RPC` | HTTP RPC。默认 `https://bsc-rpc.publicnode.com` |
 | `SNIPER_SIZE` / `SNIPER_EXIT` | 临时覆盖档位和卖出规则 |
