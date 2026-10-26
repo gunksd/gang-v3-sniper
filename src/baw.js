@@ -3,13 +3,51 @@
  * preview/execute is in flight. baw only reaches www.binance.com through the local proxy when Node is told to
  * use it, so NODE_USE_ENV_PROXY=1 is always set for the child.
  */
-import { execFile } from 'node:child_process'
+import { execFile, execFileSync, spawn } from 'node:child_process'
+import { realpathSync } from 'node:fs'
 
 const ENV = { ...process.env, NODE_USE_ENV_PROXY: '1' }
+const NO_KEYTAR = new URL('./no-keytar.mjs', import.meta.url).href
+
+/**
+ * Wallet selection. Default: the machine's normal baw session (~/.baw + keychain). With a dir: an isolated session
+ * for a second wallet (BINANCE_BAW_DIR + keychain disabled, see no-keytar.mjs), so both stay signed in.
+ */
+let isolatedDir = null
+export function useBawDir(dir) { isolatedDir = dir || null }
+export const bawDir = () => isolatedDir
+
+let bawScript = null
+function resolveBaw() {
+  if (bawScript) return bawScript
+  const bin = execFileSync('/usr/bin/env', ['which', 'baw'], { encoding: 'utf8' }).trim()
+  bawScript = realpathSync(bin)
+  return bawScript
+}
+
+/** [command, args, env] for one baw invocation in the selected session. */
+function bawCommand(args) {
+  if (!isolatedDir) return ['baw', args, ENV]
+  let script
+  try { script = resolveBaw() } catch { script = null }
+  if (!script) return ['baw', args, ENV] // ENOENT path below reports the missing CLI
+  return [process.execPath, ['--import', NO_KEYTAR, script, ...args], { ...ENV, BINANCE_BAW_DIR: isolatedDir }]
+}
+
+/** Run baw interactively (inherits the terminal) in the selected session: sign-in QR codes, ad-hoc wallet commands. */
+export function bawInteractive(args) {
+  const [cmd, argv, env] = bawCommand(args)
+  return new Promise((resolve) => {
+    const child = spawn(cmd, argv, { env, stdio: 'inherit' })
+    child.on('error', (e) => { process.stderr.write(`${e.code === 'ENOENT' ? '找不到 baw：npm i -g @binance/agentic-wallet' : e.message}\n`); resolve(1) })
+    child.on('exit', (code) => resolve(code ?? 1))
+  })
+}
 
 export function baw(args, { timeoutMs = 20_000 } = {}) {
+  const [cmd, argv, env] = bawCommand([...args, '--json'])
   return new Promise((resolve, reject) => {
-    execFile('baw', [...args, '--json'], { env: ENV, encoding: 'utf8', maxBuffer: 8 << 20, timeout: timeoutMs }, (err, stdout, stderr) => {
+    execFile(cmd, argv, { env, encoding: 'utf8', maxBuffer: 8 << 20, timeout: timeoutMs }, (err, stdout, stderr) => {
       if (err?.code === 'ENOENT') {
         return reject(new Error('找不到 baw（币安 Agentic Wallet CLI）。安装：npm i -g @binance/agentic-wallet，然后 baw auth signin'))
       }
@@ -28,7 +66,8 @@ const unwrap = (r, what) => {
 export async function bawAddress(chainId = '56') {
   const r = await baw(['wallet', 'address'])
   if (!r.success && /UNCONNECTED|NOT_LOGGED_IN|not logged in|not.*sign/i.test(JSON.stringify(r.error))) {
-    throw new Error(`baw 未登录：先运行 baw auth signin（${JSON.stringify(r.error)}）`)
+    const how = isolatedDir ? 'gang-sniper wallet auth signin' : 'baw auth signin'
+    throw new Error(`baw 未登录（${isolatedDir ? `狙击钱包 ${isolatedDir}` : '默认钱包'}）：运行 ${how}（${JSON.stringify(r.error)}）`)
   }
   const d = unwrap(r, 'wallet address')
   const a = d.addresses.find((x) => x.binanceChainId === chainId)

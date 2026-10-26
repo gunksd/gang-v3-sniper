@@ -81,6 +81,19 @@ gang-sniper doctor
 export HTTPS_PROXY=http://127.0.0.1:7890
 ```
 
+### 用另一个钱包狙击
+
+baw 在一台电脑上默认只能登录一个钱包（会话存在系统钥匙串的固定位置）。想让狙击用另一个钱包、日常那个保持登录，给狙击钱包起个名字：
+
+```bash
+# ~/.gang-sniper/config.json 里加 "wallet": "sniper"，然后：
+gang-sniper wallet auth signin     # 用币安 App 扫码，登录要用来狙击的钱包
+gang-sniper doctor                 # 确认地址、Agent ID、余额
+```
+
+这个钱包的会话单独存在 `~/.gang-sniper/wallets/sniper/`，加密写在文件里，不进钥匙串，所以不会把默认钱包挤掉。
+`gang-sniper wallet <baw 参数>` 可以对这个钱包执行任何 baw 命令，例如 `gang-sniper wallet wallet balance --binanceChainId 56`。
+
 ## 上手
 
 ```bash
@@ -254,6 +267,7 @@ gang-sniper discover --follow   # 一直等到出现
 | `SNIPER_WSS` | WSS 节点，可逗号分隔多个，同时订阅、谁先到用谁。默认 `wss://bsc-rpc.publicnode.com` |
 | `SNIPER_RPC` | HTTP RPC。默认 `https://bsc-rpc.publicnode.com` |
 | `SNIPER_SIZE` / `SNIPER_EXIT` | 临时覆盖档位和卖出规则 |
+| `SNIPER_WALLET` | 狙击用哪个钱包会话（`default` = 本机默认 baw 登录） |
 | `SNIPER_DRY_RUN` | `0` = 实盘，`1` = dry-run |
 | `SNIPER_AUTO_DISCOVER` | `0` = 关闭自动发现 |
 | `SNIPER_NETWORK` | `testnet` = BSC 测试网（只能监听和回放，baw 不支持测试网下单） |

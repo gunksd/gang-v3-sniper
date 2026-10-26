@@ -2,15 +2,22 @@
 import { createInterface } from 'node:readline/promises'
 import { writeFileSync, mkdirSync, existsSync, readFileSync } from 'node:fs'
 import { formatUnits, parseUnits, maxUint256 } from 'viem'
-import { loadConfig, SIZE_PRESETS, EXIT_PRESETS, DEFAULTS, CONFIG_FILE, DATA_DIR, exitRule, quoteAddresses, quoteKey } from './config.js'
+import { loadConfig as loadConfigRaw, SIZE_PRESETS, EXIT_PRESETS, DEFAULTS, CONFIG_FILE, DATA_DIR, exitRule, quoteAddresses, quoteKey } from './config.js'
 import { checkAnchor, fingerprintV3, discoverPad } from './discover.js'
 import { makeClient, isAgent, balanceOf, allowance, calldata, createdLogs, readCurve } from './chain.js'
-import { bawAddress, bawStatus, bawSettings, bawSend } from './baw.js'
+import { bawAddress, bawStatus, bawSettings, bawSend, useBawDir, bawInteractive } from './baw.js'
 import { Sniper } from './sniper.js'
 import { planBuy, checkTax, evaluateExit, multipleOf } from './strategy.js'
 import { loadState, openPositions } from './state.js'
 import { CREATED_TOPIC } from './abi.js'
 import { log, setQuiet } from './log.js'
+
+/** Load config and point every baw call at the selected wallet's session. */
+const loadConfig = (o) => {
+  const cfg = loadConfigRaw(o)
+  useBawDir(cfg.bawDir)
+  return cfg
+}
 
 const VERSION = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version
 const args = process.argv.slice(2)
@@ -92,7 +99,7 @@ function presetsCmd() {
 async function doctorCmd() {
   const cfg = loadConfig()
   const client = makeClient(cfg.net)
-  const out = { network: cfg.network, pad: cfg.net.pad, wss: cfg.net.wss, dryRun: cfg.dryRun, size: `${cfg.size}%`, exit: exitRule(cfg), issues: [] }
+  const out = { network: cfg.network, walletSession: cfg.bawDir ? `${cfg.wallet} (${cfg.bawDir})` : 'default (~/.baw)', pad: cfg.net.pad, wss: cfg.net.wss, dryRun: cfg.dryRun, size: `${cfg.size}%`, exit: exitRule(cfg), issues: [] }
   if (cfg.net.v3Anchor) {
     const anchorErr = await checkAnchor(client, cfg.net)
     out.anchor = { bucket: cfg.net.v3Anchor.bucket, owner: cfg.net.v3Anchor.owner, ok: !anchorErr }
@@ -107,7 +114,10 @@ async function doctorCmd() {
     if (!fp.ok) out.issues.push(`pad 指纹不符：${fp.reasons.join('；')}`)
   }
   out.bawStatus = await bawStatus()
-  if (out.bawStatus !== 'CONNECTED') out.issues.push('baw 未连接：`baw auth signin`')
+  if (out.bawStatus !== 'CONNECTED') {
+    out.issues.push(cfg.bawDir ? `狙击钱包「${cfg.wallet}」未登录：gang-sniper wallet auth signin` : 'baw 未连接：`baw auth signin`')
+    return print(out)
+  }
   out.wallet = await bawAddress()
   const s = await bawSettings()
   out.settings = { devMode: s.devMode?.enabled, devModeExpires: s.devMode?.expiresAt, tradeAllTokens: s.tradeAllTokens, abnormalTxnHandling: s.abnormalTxnHandling, quotaLeft: s.quotaLeft }
@@ -274,12 +284,24 @@ const HELP = `gang-sniper ${VERSION} — gang.fun LaunchpadV3 狙击器（币安
   gang-sniper status               持仓和实时估值
   gang-sniper sell <币地址> [--pct 100]   手动卖出
   gang-sniper discover [--follow]  只查找 V3 地址并保存
+  gang-sniper wallet <baw 参数>    在配置的狙击钱包里跑 baw，例如 wallet auth signin（登录）、wallet wallet balance
   gang-sniper replay [--from 块号]  测试网：把历史 Created 事件过一遍下单逻辑（SNIPER_NETWORK=testnet）
 
 数据目录：${DATA_DIR}（可用 SNIPER_DATA_DIR 改）
 默认 dry-run，只记录不下单；实盘请先跑 config。`
 
-const COMMANDS = { discover: discoverCmd, config: configCmd, presets: presetsCmd, doctor: doctorCmd, prepare: prepareCmd, run: runCmd, status: statusCmd, sell: sellCmd, replay: replayCmd }
+/** `gang-sniper wallet <baw args>`: run baw in the configured wallet's session (e.g. auth signin, wallet balance). */
+async function walletCmd() {
+  const cfg = loadConfig()
+  const rest = args.slice(1)
+  if (!rest.length) {
+    return print({ wallet: cfg.wallet, session: cfg.bawDir || 'default (~/.baw + keychain)', usage: 'gang-sniper wallet auth signin | wallet balance --binanceChainId 56 | wallet address | auth signout' })
+  }
+  if (cfg.bawDir) mkdirSync(cfg.bawDir, { recursive: true, mode: 0o700 })
+  process.exit(await bawInteractive(rest))
+}
+
+const COMMANDS = { wallet: walletCmd, discover: discoverCmd, config: configCmd, presets: presetsCmd, doctor: doctorCmd, prepare: prepareCmd, run: runCmd, status: statusCmd, sell: sellCmd, replay: replayCmd }
 
 if (cmd === '--version' || cmd === '-v') { console.log(VERSION); process.exit(0) }
 const fn = COMMANDS[cmd]

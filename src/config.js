@@ -81,6 +81,9 @@ export const DEFAULTS = {
   onlyCreators: [], // non-empty = whitelist
   maxPerCreatorPerDay: 2,
   dryRun: true,
+  // which Agentic Wallet signs: 'default' = this machine's normal baw login; any other name = a separate, isolated
+  // baw session under ~/.gang-sniper/wallets/<name> (sign in once with `gang-sniper wallet auth signin`)
+  wallet: 'default',
   autoDiscover: true, // no pad configured → watch the anchor bucket and fill the V3 address in automatically
   autoPrepare: true, // after discovery (live mode only): approve the pad for dailyBudgetQuote, not unlimited
   pollExitSec: 5,
@@ -101,6 +104,7 @@ export function loadConfig(overrides = {}) {
     pad: process.env.SNIPER_PAD,
     size: process.env.SNIPER_SIZE,
     exit: process.env.SNIPER_EXIT,
+    wallet: process.env.SNIPER_WALLET,
     dryRun: process.env.SNIPER_DRY_RUN != null ? process.env.SNIPER_DRY_RUN !== '0' : undefined,
     slippagePct: envJson('SNIPER_SLIPPAGE'),
   }
@@ -118,7 +122,14 @@ export function loadConfig(overrides = {}) {
     },
   }
   validate(resolved)
-  return resolved
+  return { ...resolved, bawDir: walletDir(resolved.wallet) }
+}
+
+/** baw session dir for a wallet name; null = the machine's default session. */
+export function walletDir(name) {
+  if (!name || name === 'default') return null
+  if (!/^[A-Za-z0-9_-]{1,32}$/.test(name)) throw new Error(`wallet name must be letters, digits, _ or - (got ${name})`)
+  return join(DATA_DIR, 'wallets', name)
 }
 
 export function sizeBps(cfg) {
