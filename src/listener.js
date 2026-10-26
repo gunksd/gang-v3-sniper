@@ -8,6 +8,7 @@
 import { CREATED_TOPIC } from './abi.js'
 import { parseCreated, createdLogs } from './chain.js'
 import { log } from './log.js'
+import { redact } from './config.js'
 
 const HEARTBEAT_MS = 15_000
 const HEARTBEAT_TIMEOUT_MS = 8_000
@@ -44,6 +45,7 @@ export function listenCreated({ urls, pad, client, onCreated, reconnectMs = 1500
   }
 
   function connect(url) {
+    const name = redact(url) // logs never carry an API key
     if (stopped) return
     const t0 = Date.now()
     const ws = new WebSocket(url)
@@ -59,7 +61,7 @@ export function listenCreated({ urls, pad, client, onCreated, reconnectMs = 1500
       sockets.delete(ws)
       try { ws.close() } catch { /* already closed */ }
       if (stopped) return
-      log('wss_reconnect', { url, reason, inMs: reconnectMs })
+      log('wss_reconnect', { url: name, reason, inMs: reconnectMs })
       setTimeout(() => connect(url), reconnectMs)
     }
 
@@ -74,9 +76,9 @@ export function listenCreated({ urls, pad, client, onCreated, reconnectMs = 1500
       let msg
       try { msg = JSON.parse(String(m.data)) } catch { return }
       if (msg.id === 1) {
-        if (msg.error) return close(`subscribe error: ${msg.error.message}`)
+        if (msg.error) return close(`subscribe error: ${redact(msg.error.message)}`)
         subId = msg.result
-        log('wss_subscribed', { url, subId, ms: Date.now() - t0 })
+        log('wss_subscribed', { url: name, subId, ms: Date.now() - t0 })
         // anything mined while this socket was down
         if (lastBlock != null) backfill(lastBlock + 1n)
         return
@@ -84,10 +86,10 @@ export function listenCreated({ urls, pad, client, onCreated, reconnectMs = 1500
       if (msg.id) { clearTimeout(pongTimer); return } // heartbeat reply
       if (msg.method === 'eth_subscription' && msg.params?.subscription === subId) {
         const raw = msg.params.result
-        deliver(parse(raw), { source: url, backfilled: false, receivedAt: Date.now() })
+        deliver(parse(raw), { source: name, backfilled: false, receivedAt: Date.now() })
       }
     }
-    ws.onerror = (e) => log('wss_error', { url, error: e?.message || 'socket error' })
+    ws.onerror = (e) => log('wss_error', { url: name, error: e?.message || 'socket error' })
     ws.onclose = () => { if (sockets.has(ws)) close('closed by peer') }
   }
 

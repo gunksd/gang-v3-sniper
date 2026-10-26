@@ -2,10 +2,10 @@
 import { createInterface } from 'node:readline/promises'
 import { writeFileSync, mkdirSync, existsSync, readFileSync } from 'node:fs'
 import { formatUnits, parseUnits, maxUint256 } from 'viem'
-import { loadConfig as loadConfigRaw, SIZE_PRESETS, EXIT_PRESETS, DEFAULTS, CONFIG_FILE, DATA_DIR, exitRule, quoteAddresses, quoteKey } from './config.js'
+import { loadConfig as loadConfigRaw, SIZE_PRESETS, EXIT_PRESETS, DEFAULTS, CONFIG_FILE, DATA_DIR, SECRETS_FILE, exitRule, quoteAddresses, quoteKey, redact } from './config.js'
 import { checkAnchor, fingerprintV3, discoverPad } from './discover.js'
 import { makeClient, isAgent, balanceOf, allowance, calldata, createdLogs, readCurve } from './chain.js'
-import { bawAddress, bawStatus, bawSettings, bawSend, useBawDir, bawInteractive } from './baw.js'
+import { bawAddress, bawStatus, bawSettings, bawSend, useBawBin, bawBin, bawInteractive, requireBaw } from './baw.js'
 import { Sniper } from './sniper.js'
 import { planBuy, checkTax, evaluateExit, multipleOf } from './strategy.js'
 import { loadState, openPositions } from './state.js'
@@ -15,7 +15,7 @@ import { log, setQuiet } from './log.js'
 /** Load config and point every baw call at the selected wallet's session. */
 const loadConfig = (o) => {
   const cfg = loadConfigRaw(o)
-  useBawDir(cfg.bawDir)
+  useBawBin(cfg.bawBin)
   return cfg
 }
 
@@ -99,7 +99,11 @@ function presetsCmd() {
 async function doctorCmd() {
   const cfg = loadConfig()
   const client = makeClient(cfg.net)
-  const out = { network: cfg.network, walletSession: cfg.bawDir ? `${cfg.wallet} (${cfg.bawDir})` : 'default (~/.baw)', pad: cfg.net.pad, wss: cfg.net.wss, dryRun: cfg.dryRun, size: `${cfg.size}%`, exit: exitRule(cfg), issues: [] }
+  const out = {
+    network: cfg.network, baw: bawBin(), pad: cfg.net.pad, rpc: redact(cfg.net.rpc), wss: cfg.net.wss.split(',').map(redact),
+    secrets: existsSync(SECRETS_FILE) ? SECRETS_FILE : 'none (public nodes)',
+    dryRun: cfg.dryRun, size: `${cfg.size}%`, exit: exitRule(cfg), issues: [],
+  }
   if (cfg.net.v3Anchor) {
     const anchorErr = await checkAnchor(client, cfg.net)
     out.anchor = { bucket: cfg.net.v3Anchor.bucket, owner: cfg.net.v3Anchor.owner, ok: !anchorErr }
@@ -115,7 +119,7 @@ async function doctorCmd() {
   }
   out.bawStatus = await bawStatus()
   if (out.bawStatus !== 'CONNECTED') {
-    out.issues.push(cfg.bawDir ? `狙击钱包「${cfg.wallet}」未登录：gang-sniper wallet auth signin` : 'baw 未连接：`baw auth signin`')
+    out.issues.push(`钱包未登录：${bawBin()} auth signin`)
     return print(out)
   }
   out.wallet = await bawAddress()
@@ -138,9 +142,18 @@ async function doctorCmd() {
     }
   } else {
     for (const q of quoteAddresses(cfg)) out.quotes[q] = { balance: fmt(await balanceOf(client, q, out.wallet)) }
+    if (cfg.net.agentIdRegistry) {
+      const n = await client.readContract({ address: cfg.net.agentIdRegistry, abi: [{ type: 'function', name: 'balanceOf', stateMutability: 'view', inputs: [{ type: 'address' }], outputs: [{ type: 'uint256' }] }], functionName: 'balanceOf', args: [out.wallet] }).catch(() => null)
+      out.isAgent = n == null ? 'read failed' : n > 0n
+      if (out.isAgent === false) out.issues.push('钱包没有 Agent ID（.ai），V3 内盘买不了')
+    }
   }
-  out.wssProbe = await probeWss(cfg.net.wss.split(',')[0].trim(), cfg.net.pad || cfg.net.v3Anchor?.bucket)
-  if (!out.wssProbe.ok) out.issues.push(`WSS 订阅失败：${out.wssProbe.error}`)
+  out.wssProbe = []
+  for (const u of cfg.net.wss.split(',').map((x) => x.trim()).filter(Boolean)) {
+    const r = await probeWss(u, cfg.net.pad || cfg.net.v3Anchor?.bucket)
+    out.wssProbe.push({ ...r, url: redact(u), ...(r.error && { error: redact(r.error) }) })
+  }
+  if (!out.wssProbe.some((r) => r.ok)) out.issues.push('所有 WSS 订阅都失败')
   print(out)
 }
 
@@ -160,7 +173,7 @@ async function prepareCmd() {
   const cfg = loadConfig()
   if (!cfg.net.bawChainId) throw new Error(`baw cannot sign on ${cfg.network}`)
   const client = makeClient(cfg.net)
-  const me = await bawAddress()
+  const me = await requireBaw()
   const wrap = opt('wrap')
   if (wrap) {
     const r = await bawSend({ from: me, to: cfg.net.wbnb, value: parseUnits(wrap, 18), data: calldata.wrap(), chainId: cfg.net.bawChainId })
@@ -182,8 +195,8 @@ async function prepareCmd() {
 async function runCmd() {
   const cfg = loadConfig()
   const client = makeClient(cfg.net)
-  const me = await bawAddress()
-  if (!cfg.dryRun && (await bawStatus()) !== 'CONNECTED') throw new Error('baw not connected: `baw auth signin`')
+  const me = await requireBaw()
+  log('wallet', { baw: bawBin(), address: me })
   const sniper = new Sniper({ cfg, client, me })
   // before start(): start() can wait a long time in V3 auto-discovery
   const stop = (sig) => { log('stop', { signal: sig }); sniper.stop(); process.exit(0) }
@@ -194,7 +207,7 @@ async function runCmd() {
 async function statusCmd() {
   const cfg = loadConfig()
   const client = makeClient(cfg.net)
-  const me = await bawAddress()
+  const me = await requireBaw()
   const sniper = new Sniper({ cfg, client, me })
   const st = loadState()
   const rows = []
@@ -218,7 +231,7 @@ async function sellCmd() {
   const pct = BigInt(Math.round(Number(opt('pct', '100'))))
   const cfg = loadConfig()
   const client = makeClient(cfg.net)
-  const me = await bawAddress()
+  const me = await requireBaw()
   const sniper = new Sniper({ cfg, client, me })
   const pos = sniper.state.positions[token.toLowerCase()]
   if (!pos) throw new Error(`no position for ${token}`)
@@ -284,20 +297,17 @@ const HELP = `gang-sniper ${VERSION} — gang.fun LaunchpadV3 狙击器（币安
   gang-sniper status               持仓和实时估值
   gang-sniper sell <币地址> [--pct 100]   手动卖出
   gang-sniper discover [--follow]  只查找 V3 地址并保存
-  gang-sniper wallet <baw 参数>    在配置的狙击钱包里跑 baw，例如 wallet auth signin（登录）、wallet wallet balance
+  gang-sniper wallet <baw 参数>    用配置的 baw（bawBin / SNIPER_BAW）执行，例如 wallet wallet balance --binanceChainId 56
   gang-sniper replay [--from 块号]  测试网：把历史 Created 事件过一遍下单逻辑（SNIPER_NETWORK=testnet）
 
 数据目录：${DATA_DIR}（可用 SNIPER_DATA_DIR 改）
 默认 dry-run，只记录不下单；实盘请先跑 config。`
 
-/** `gang-sniper wallet <baw args>`: run baw in the configured wallet's session (e.g. auth signin, wallet balance). */
+/** `gang-sniper wallet <baw args>`: run the configured baw (bawBin / SNIPER_BAW) with these args. */
 async function walletCmd() {
-  const cfg = loadConfig()
+  loadConfig()
   const rest = args.slice(1)
-  if (!rest.length) {
-    return print({ wallet: cfg.wallet, session: cfg.bawDir || 'default (~/.baw + keychain)', usage: 'gang-sniper wallet auth signin | wallet balance --binanceChainId 56 | wallet address | auth signout' })
-  }
-  if (cfg.bawDir) mkdirSync(cfg.bawDir, { recursive: true, mode: 0o700 })
+  if (!rest.length) return print({ baw: bawBin(), usage: 'gang-sniper wallet wallet status | wallet address | wallet balance --binanceChainId 56' })
   process.exit(await bawInteractive(rest))
 }
 

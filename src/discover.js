@@ -9,6 +9,7 @@
  */
 import { parseAbi, getAddress, keccak256, toBytes } from 'viem'
 import { log } from './log.js'
+import { redact } from './config.js'
 
 export const OPERATOR_UPDATED_TOPIC = keccak256(toBytes('OperatorUpdated(address,bool)'))
 
@@ -159,15 +160,18 @@ export function discoverPad({ client, net, fromBlock, pollMs = 15_000, signal, c
       }
     }
 
+    let scanning = false
     const scan = async () => {
-      if (done) return
+      // the first pass over a long lookback outlasts the poll interval: never run two passes at once
+      if (done || scanning) return
+      scanning = true
       try {
         const head = (await client.getBlockNumber()) - HEAD_MARGIN
         const floor = maxLookback == null || head <= maxLookback ? 0n : head - maxLookback
         if (cursor == null || cursor < floor) {
           if (cursor != null && !gapLogged) {
             gapLogged = true
-            log('v3_discover_gap', { from: cursor, to: floor - 1n, note: 'older than the public RPC keeps logs for; not scanned (set SNIPER_RPC to an archive node to cover it)' })
+            log('v3_discover_gap', { from: cursor, to: floor - 1n, note: 'outside the lookback window (public nodes keep ~9000 blocks); not scanned' })
           }
           cursor = floor
         }
@@ -181,13 +185,15 @@ export function discoverPad({ client, net, fromBlock, pollMs = 15_000, signal, c
         }
         await recheck()
       } catch (e) {
-        log('v3_discover_error', { error: e.shortMessage || e.message })
+        log('v3_discover_error', { error: redact(e.shortMessage || e.message) })
+      } finally {
+        scanning = false
       }
     }
 
     const subscribe = () => {
       if (done) return
-      ws = new WebSocket(net.wss.split(',')[0].trim())
+      ws = new WebSocket(net.wss.split(',')[0].trim()) // first = the private node when one is configured
       ws.onopen = () => ws.send(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_subscribe', params: ['logs', { address: net.v3Anchor.bucket, topics: [OPERATOR_UPDATED_TOPIC] }] }))
       ws.onmessage = (m) => {
         let msg

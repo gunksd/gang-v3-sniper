@@ -21,6 +21,8 @@ export const NETWORKS = {
     wbnb: '0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c',
     usdt: '0x55d398326f99059fF775485246999027B3197955',
     router: '0x10ED43C718714eb63d5aA57B78B54704E256024E',
+    // Agent ID NFT the V3 pad gates on (DeployLaunchpadV3: LaunchpadV3MainnetRefs.AGENT_ID_REGISTRY, same as V2)
+    agentIdRegistry: '0x60B9262456dE011F7d15a54CdD8c48bAaa8B022F',
     // auto-discovery anchor: the live V2 PlatformFeeBucket that DeployLaunchpadV3 reuses on mainnet. Only its owner
     // (gang team EOA, docs/MAINNET-LAUNCHPAD-V2-ADDRESSES-2026-10-23.md) can make a pad an operator.
     v3Anchor: { bucket: '0xBDDd8F275D7Cb65f5454D0bEDf0463792878F111', owner: '0x4EEdcDF5fab775e10C0D09951b6F59Ab81ba19d3' },
@@ -81,9 +83,9 @@ export const DEFAULTS = {
   onlyCreators: [], // non-empty = whitelist
   maxPerCreatorPerDay: 2,
   dryRun: true,
-  // which Agentic Wallet signs: 'default' = this machine's normal baw login; any other name = a separate, isolated
-  // baw session under ~/.gang-sniper/wallets/<name> (sign in once with `gang-sniper wallet auth signin`)
-  wallet: 'default',
+  // which baw binary signs: 'baw' = this machine's default wallet; a per-wallet wrapper such as ~/.baw2-cli/bin/baw
+  // (sets BINANCE_BAW_DIR) selects another one. SNIPER_BAW overrides.
+  bawBin: 'baw',
   autoDiscover: true, // no pad configured → watch the anchor bucket and fill the V3 address in automatically
   autoPrepare: true, // after discovery (live mode only): approve the pad for dailyBudgetQuote, not unlimited
   pollExitSec: 5,
@@ -104,7 +106,7 @@ export function loadConfig(overrides = {}) {
     pad: process.env.SNIPER_PAD,
     size: process.env.SNIPER_SIZE,
     exit: process.env.SNIPER_EXIT,
-    wallet: process.env.SNIPER_WALLET,
+    bawBin: process.env.SNIPER_BAW,
     dryRun: process.env.SNIPER_DRY_RUN != null ? process.env.SNIPER_DRY_RUN !== '0' : undefined,
     slippagePct: envJson('SNIPER_SLIPPAGE'),
   }
@@ -112,24 +114,42 @@ export function loadConfig(overrides = {}) {
   const cfg = { ...DEFAULTS, ...file, ...clean(env), ...clean(overrides) }
   const net = NETWORKS[cfg.network]
   if (!net) throw new Error(`unknown network ${cfg.network} (mainnet | testnet)`)
+  const secret = cfg.network === 'mainnet' ? loadSecrets() : {}
+  const secretWss = secret.wss ? [].concat(secret.wss) : (secret.rpc ? [secret.rpc.replace(/^http/, 'ws')] : [])
+  // private node first (it serves archive logs), the public one stays subscribed too as a second, independent feed
+  const wss = process.env.SNIPER_WSS || [...secretWss, net.wss].join(',')
+  const rpc = process.env.SNIPER_RPC || secret.rpc || net.rpc
+  const archive = !!(process.env.SNIPER_RPC || secret.rpc)
   const resolved = {
     ...cfg,
     net: {
       ...net,
       pad: cfg.pad || cfg.discovered?.[cfg.network]?.pad || net.pad,
-      wss: process.env.SNIPER_WSS || net.wss,
-      rpc: process.env.SNIPER_RPC || net.rpc,
+      wss,
+      rpc,
+      // a private/archive node serves old logs: discovery can look back days instead of the public ~9000 blocks
+      ...(archive && net.v3Anchor && { v3Anchor: { ...net.v3Anchor, maxLookback: net.v3Anchor.maxLookback === null ? null : 300_000n } }),
     },
   }
   validate(resolved)
-  return { ...resolved, bawDir: walletDir(resolved.wallet) }
+  return resolved
 }
 
-/** baw session dir for a wallet name; null = the machine's default session. */
-export function walletDir(name) {
-  if (!name || name === 'default') return null
-  if (!/^[A-Za-z0-9_-]{1,32}$/.test(name)) throw new Error(`wallet name must be letters, digits, _ or - (got ${name})`)
-  return join(DATA_DIR, 'wallets', name)
+/**
+ * Private endpoints (API keys) live outside the repo and the shareable config: ~/.config/gang-sniper/secrets.json
+ *   { "rpc": "https://…", "wss": ["wss://…"] }    wss defaults to the rpc URL with https→wss
+ */
+export const SECRETS_FILE = process.env.SNIPER_SECRETS || join(homedir(), '.config', 'gang-sniper', 'secrets.json')
+function loadSecrets() {
+  if (!existsSync(SECRETS_FILE)) return {}
+  try { return JSON.parse(readFileSync(SECRETS_FILE, 'utf8')) } catch (e) { throw new Error(`${SECRETS_FILE}: ${e.message}`) }
+}
+
+/** Hide API keys in anything printed or logged: path segments that look like keys, and key-ish query params. */
+export function redact(url) {
+  return String(url)
+    .replace(/(\/v[0-9]+\/)[^/?#\s]{8,}/g, '$1***')
+    .replace(/([?&](?:key|apikey|api_key|token)=)[^&#\s]+/gi, '$1***')
 }
 
 export function sizeBps(cfg) {

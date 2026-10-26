@@ -4,7 +4,8 @@ import { bsc, bscTestnet } from 'viem/chains'
 import { V3_ABI, ERC20_ABI, WBNB_ABI, ROUTER_ABI, CREATED_TOPIC } from './abi.js'
 
 export function makeClient(net) {
-  return createPublicClient({ chain: net.chainId === 56 ? bsc : bscTestnet, transport: http(net.rpc, { timeout: 10_000, retryCount: 2 }) })
+  // 750ms receipt polling (viem default 4s): a fill's refund is back sooner for the next snipe
+  return createPublicClient({ chain: net.chainId === 56 ? bsc : bscTestnet, pollingInterval: 750, transport: http(net.rpc, { timeout: 10_000, retryCount: 2 }) })
 }
 
 const topicAddr = (t) => getAddress(`0x${t.slice(26)}`)

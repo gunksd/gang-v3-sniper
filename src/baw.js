@@ -3,53 +3,35 @@
  * preview/execute is in flight. baw only reaches www.binance.com through the local proxy when Node is told to
  * use it, so NODE_USE_ENV_PROXY=1 is always set for the child.
  */
-import { execFile, execFileSync, spawn } from 'node:child_process'
-import { realpathSync } from 'node:fs'
+import { execFile, spawn } from 'node:child_process'
+import { homedir } from 'node:os'
 
 const ENV = { ...process.env, NODE_USE_ENV_PROXY: '1' }
-const NO_KEYTAR = new URL('./no-keytar.mjs', import.meta.url).href
 
 /**
- * Wallet selection. Default: the machine's normal baw session (~/.baw + keychain). With a dir: an isolated session
- * for a second wallet (BINANCE_BAW_DIR + keychain disabled, see no-keytar.mjs), so both stay signed in.
+ * Which baw binary signs. Default `baw` (the machine's default wallet, ~/.baw). Point it at a per-wallet wrapper
+ * (e.g. ~/.baw2-cli/bin/baw, which sets BINANCE_BAW_DIR) with SNIPER_BAW or the `bawBin` config key.
  */
-let isolatedDir = null
-export function useBawDir(dir) { isolatedDir = dir || null }
-export const bawDir = () => isolatedDir
+let BAW_BIN = (process.env.SNIPER_BAW || 'baw').replace(/^~(?=\/)/, homedir())
+export function useBawBin(bin) { if (bin) BAW_BIN = String(bin).replace(/^~(?=\/)/, homedir()) }
+export const bawBin = () => BAW_BIN
 
-let bawScript = null
-function resolveBaw() {
-  if (bawScript) return bawScript
-  const bin = execFileSync('/usr/bin/env', ['which', 'baw'], { encoding: 'utf8' }).trim()
-  bawScript = realpathSync(bin)
-  return bawScript
-}
-
-/** [command, args, env] for one baw invocation in the selected session. */
-function bawCommand(args) {
-  if (!isolatedDir) return ['baw', args, ENV]
-  let script
-  try { script = resolveBaw() } catch { script = null }
-  if (!script) return ['baw', args, ENV] // ENOENT path below reports the missing CLI
-  return [process.execPath, ['--import', NO_KEYTAR, script, ...args], { ...ENV, BINANCE_BAW_DIR: isolatedDir }]
-}
-
-/** Run baw interactively (inherits the terminal) in the selected session: sign-in QR codes, ad-hoc wallet commands. */
+/** Run baw interactively (inherits the terminal): sign-in QR codes, ad-hoc wallet commands. */
 export function bawInteractive(args) {
-  const [cmd, argv, env] = bawCommand(args)
   return new Promise((resolve) => {
-    const child = spawn(cmd, argv, { env, stdio: 'inherit' })
-    child.on('error', (e) => { process.stderr.write(`${e.code === 'ENOENT' ? '找不到 baw：npm i -g @binance/agentic-wallet' : e.message}\n`); resolve(1) })
+    const child = spawn(BAW_BIN, args, { env: ENV, stdio: 'inherit' })
+    child.on('error', (e) => { process.stderr.write(`${e.code === 'ENOENT' ? `找不到 baw：${BAW_BIN}` : e.message}\n`); resolve(1) })
     child.on('exit', (code) => resolve(code ?? 1))
   })
 }
 
 export function baw(args, { timeoutMs = 20_000 } = {}) {
-  const [cmd, argv, env] = bawCommand([...args, '--json'])
   return new Promise((resolve, reject) => {
-    execFile(cmd, argv, { env, encoding: 'utf8', maxBuffer: 8 << 20, timeout: timeoutMs }, (err, stdout, stderr) => {
+    execFile(BAW_BIN, [...args, '--json'], { env: ENV, encoding: 'utf8', maxBuffer: 8 << 20, timeout: timeoutMs }, (err, stdout, stderr) => {
       if (err?.code === 'ENOENT') {
-        return reject(new Error('找不到 baw（币安 Agentic Wallet CLI）。安装：npm i -g @binance/agentic-wallet，然后 baw auth signin'))
+        return reject(new Error(BAW_BIN === 'baw'
+          ? '找不到 baw（币安 Agentic Wallet CLI）。安装：npm i -g @binance/agentic-wallet，然后 baw auth signin'
+          : `找不到 baw：${BAW_BIN}（检查 SNIPER_BAW / bawBin）`))
       }
       // baw exits non-zero with a JSON error body on stdout
       try { return resolve(JSON.parse(stdout)) } catch { /* fall through */ }
@@ -66,8 +48,7 @@ const unwrap = (r, what) => {
 export async function bawAddress(chainId = '56') {
   const r = await baw(['wallet', 'address'])
   if (!r.success && /UNCONNECTED|NOT_LOGGED_IN|not logged in|not.*sign/i.test(JSON.stringify(r.error))) {
-    const how = isolatedDir ? 'gang-sniper wallet auth signin' : 'baw auth signin'
-    throw new Error(`baw 未登录（${isolatedDir ? `狙击钱包 ${isolatedDir}` : '默认钱包'}）：运行 ${how}（${JSON.stringify(r.error)}）`)
+    throw new Error(`baw 未登录（${BAW_BIN}）：运行 ${BAW_BIN} auth signin（${JSON.stringify(r.error)}）`)
   }
   const d = unwrap(r, 'wallet address')
   const a = d.addresses.find((x) => x.binanceChainId === chainId)
@@ -124,4 +105,11 @@ export async function bawSend(call, { allowConfirmation = false } = {}) {
   if (p.requireConfirmation && !allowConfirmation) return { ok: false, stage: 'confirmation', error: 'risk engine requires App confirmation', preview: p }
   const e = await bawExecute(p.requestId)
   return { ...e, stage: 'execute', preview: p }
+}
+
+/** Refuse to run on a signed-out wallet: a silent fallback could sign with the wrong one. → BSC address */
+export async function requireBaw() {
+  const status = await bawStatus()
+  if (status !== 'CONNECTED') throw new Error(`钱包未登录（${BAW_BIN}，状态 ${status}）：运行 ${BAW_BIN} auth signin`)
+  return bawAddress()
 }

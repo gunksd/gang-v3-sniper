@@ -81,18 +81,43 @@ gang-sniper doctor
 export HTTPS_PROXY=http://127.0.0.1:7890
 ```
 
-### 用另一个钱包狙击
+### 用另一个钱包狙击（多钱包）
 
-baw 在一台电脑上默认只能登录一个钱包（会话存在系统钥匙串的固定位置）。想让狙击用另一个钱包、日常那个保持登录，给狙击钱包起个名字：
+baw 的会话目录可以用环境变量 `BINANCE_BAW_DIR` 指定，默认 `~/.baw`。每个钱包配一个独立目录和一个包装脚本：
 
 ```bash
-# ~/.gang-sniper/config.json 里加 "wallet": "sniper"，然后：
-gang-sniper wallet auth signin     # 用币安 App 扫码，登录要用来狙击的钱包
-gang-sniper doctor                 # 确认地址、Agent ID、余额
+N=2
+PKG=$(cd "$(dirname "$(readlink -f "$(which baw)")")/.." && pwd)
+NODE=$(readlink -f "$(which node)")
+mkdir -p ~/.baw$N ~/.baw$N-cli/bin && chmod 700 ~/.baw$N
+cp -R "$PKG" ~/.baw$N-cli/pkg                    # 固定版本，全局升级不影响
+rm -rf ~/.baw$N-cli/pkg/node_modules/@github/keytar   # macOS 必须做，见下
+cat > ~/.baw$N-cli/bin/baw <<EOS
+#!/bin/bash
+export BINANCE_BAW_DIR="\$HOME/.baw$N"
+exec "$NODE" "\$HOME/.baw$N-cli/pkg/dist/index.js" "\$@"
+EOS
+chmod +x ~/.baw$N-cli/bin/baw
+~/.baw$N-cli/bin/baw auth signin                  # 扫码登录这个钱包
 ```
 
-这个钱包的会话单独存在 `~/.gang-sniper/wallets/sniper/`，加密写在文件里，不进钥匙串，所以不会把默认钱包挤掉。
-`gang-sniper wallet <baw 参数>` 可以对这个钱包执行任何 baw 命令，例如 `gang-sniper wallet wallet balance --binanceChainId 56`。
+> **为什么要删 keytar**：baw 有系统钥匙串时，会把会话 ID 存进钥匙串里一个**固定的**条目（`baw` / `agentSessionId`），
+> 和 `BINANCE_BAW_DIR` 无关。不删的话，登录第二个钱包会覆盖第一个钱包的会话。删掉后 baw 改把会话 ID 加密存在
+> `BINANCE_BAW_DIR/session.json`。会话加密密钥由本机 MAC 地址派生，会话目录不能拷到别的机器用。
+
+然后让狙击器用它：`~/.gang-sniper/config.json` 里写 `"bawBin": "~/.baw2-cli/bin/baw"`，或者启动时 `SNIPER_BAW=~/.baw2-cli/bin/baw`。
+启动时会先查这个钱包的登录状态，没登录就报错退出，不会退回去用默认钱包。
+
+### 私有 RPC
+
+有 API key 的节点写在 `~/.config/gang-sniper/secrets.json`（不在仓库里，日志里 key 会打码）：
+
+```json
+{ "rpc": "https://bnb-mainnet.g.alchemy.com/v2/<你的key>" }
+```
+
+- WSS 默认取同一个地址（https→wss），和公共节点同时订阅，谁先到用谁
+- 归档节点能查旧日志，V3 自动发现的回溯从约 8 小时扩到约 10 天
 
 ## 上手
 
@@ -267,7 +292,8 @@ gang-sniper discover --follow   # 一直等到出现
 | `SNIPER_WSS` | WSS 节点，可逗号分隔多个，同时订阅、谁先到用谁。默认 `wss://bsc-rpc.publicnode.com` |
 | `SNIPER_RPC` | HTTP RPC。默认 `https://bsc-rpc.publicnode.com` |
 | `SNIPER_SIZE` / `SNIPER_EXIT` | 临时覆盖档位和卖出规则 |
-| `SNIPER_WALLET` | 狙击用哪个钱包会话（`default` = 本机默认 baw 登录） |
+| `SNIPER_BAW` | 用哪个 baw（钱包），例如 `~/.baw2-cli/bin/baw`；默认 `baw` |
+| `SNIPER_SECRETS` | 私有 RPC 配置文件，默认 `~/.config/gang-sniper/secrets.json` |
 | `SNIPER_DRY_RUN` | `0` = 实盘，`1` = dry-run |
 | `SNIPER_AUTO_DISCOVER` | `0` = 关闭自动发现 |
 | `SNIPER_NETWORK` | `testnet` = BSC 测试网（只能监听和回放，baw 不支持测试网下单） |

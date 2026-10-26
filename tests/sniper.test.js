@@ -75,3 +75,4 @@ describe('auto-wrap guard', () => {
     expect(bawSend.mock.calls[0][0].value).toBe(59n * E18 / 100n)
   })
 })
+

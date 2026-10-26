@@ -223,3 +223,32 @@ describe('fixed send per buy (buyQuoteIn), refund recycled', () => {
     expect(() => fixed({ size: '0.5' })).toThrow(/only works with size 1/)
   })
 })
+
+describe('secrets', () => {
+  it('redact hides alchemy/infura style keys and key query params, keeps the host', async () => {
+    const { redact } = await import('../src/config.js')
+    expect(redact('https://bnb-mainnet.g.alchemy.com/v2/alch_ABCDEFGH12345678')).toBe('https://bnb-mainnet.g.alchemy.com/v2/***')
+    expect(redact('wss://bnb-mainnet.g.alchemy.com/v2/alch_ABCDEFGH12345678')).toBe('wss://bnb-mainnet.g.alchemy.com/v2/***')
+    expect(redact('https://x.io/rpc?apikey=SECRET123&chain=56')).toBe('https://x.io/rpc?apikey=***&chain=56')
+    expect(redact('wss://bsc-rpc.publicnode.com')).toBe('wss://bsc-rpc.publicnode.com')
+  })
+})
+
+describe('discovery scan concurrency', () => {
+  it('a slow first pass is never overlapped by the next poll', async () => {
+    const { discoverPad } = await import('../src/discover.js')
+    const { NETWORKS } = await import('../src/config.js')
+    const net = { ...NETWORKS.mainnet, pad: null }
+    let inFlight = 0, maxInFlight = 0
+    const client = {
+      getBlockNumber: async () => 130_000_000n,
+      getLogs: async () => { inFlight++; maxInFlight = Math.max(maxInFlight, inFlight); await new Promise((r) => setTimeout(r, 30)); inFlight--; return [] },
+      readContract: async () => '0x4EEdcDF5fab775e10C0D09951b6F59Ab81ba19d3',
+    }
+    const ctl = new AbortController()
+    const p = discoverPad({ client, net, signal: ctl.signal, pollMs: 5 }).catch(() => {})
+    await new Promise((r) => setTimeout(r, 200))
+    ctl.abort(); await p
+    expect(maxInFlight).toBe(1)
+  })
+})
