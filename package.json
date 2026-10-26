@@ -1,0 +1,42 @@
+{
+  "name": "gang-v3-sniper",
+  "version": "0.1.0",
+  "description": "gang.fun LaunchpadV3 狙击器：WSS 监听 Created，币安 Agentic Wallet（baw）签名下单，V3 地址自动发现",
+  "scripts": {
+    "start": "node bin/gang-sniper.js run",
+    "test": "vitest run",
+    "test:testnet": "TESTNET_IT=1 vitest run tests/testnet.it.test.js"
+  },
+  "type": "module",
+  "dependencies": {
+    "viem": "2.38.3"
+  },
+  "devDependencies": {
+    "vitest": "3.2.4"
+  },
+  "bin": {
+    "gang-sniper": "bin/gang-sniper.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "README.md"
+  ],
+  "keywords": [
+    "gang.fun",
+    "bsc",
+    "bnb",
+    "sniper",
+    "launchpad",
+    "binance-agentic-wallet"
+  ],
+  "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gunksd/gang-v3-sniper.git"
+  },
+  "homepage": "https://github.com/gunksd/gang-v3-sniper#readme"
+}
