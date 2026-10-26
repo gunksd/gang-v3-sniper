@@ -64,3 +64,48 @@ export const ROUTER_ABI = [
     { name: 'to', type: 'address' }, { name: 'deadline', type: 'uint256' },
   ], outputs: [] },
 ]
+
+/** FairMintPad (打新), gang-launchpad main src/fair-mint/FairMintPad.sol */
+export const FAIR_ABI = [
+  { type: 'event', name: 'Created', inputs: [
+    { name: 'token', type: 'address', indexed: true }, { name: 'creator', type: 'address', indexed: true },
+    { name: 'name', type: 'string', indexed: false }, { name: 'symbol', type: 'string', indexed: false },
+    { name: 'logoURI', type: 'string', indexed: false }, { name: 'quote', type: 'address', indexed: true },
+    { name: 'refPool', type: 'address', indexed: false }, { name: 'raiseBnb', type: 'uint256', indexed: false },
+    { name: 'sharePrice', type: 'uint256', indexed: false }, { name: 'capShares', type: 'uint256', indexed: false },
+    { name: 'deadline', type: 'uint256', indexed: false }, { name: 'holdBps', type: 'uint256', indexed: false },
+    { name: 'mintFeeBps', type: 'uint256', indexed: false }, { name: 'exitFeeBps', type: 'uint256', indexed: false },
+  ] },
+  { type: 'event', name: 'Minted', inputs: [
+    { name: 'token', type: 'address', indexed: true }, { name: 'user', type: 'address', indexed: true },
+    { name: 'shares', type: 'uint256', indexed: false }, { name: 'cost', type: 'uint256', indexed: false },
+    { name: 'fee', type: 'uint256', indexed: false }, { name: 'userShares', type: 'uint256', indexed: false },
+    { name: 'sold', type: 'uint256', indexed: false },
+  ] },
+  { type: 'event', name: 'Launched', inputs: [
+    { name: 'token', type: 'address', indexed: true }, { name: 'pair', type: 'address', indexed: true },
+    { name: 'quote', type: 'address', indexed: false }, { name: 'tokenAmount', type: 'uint256', indexed: false },
+    { name: 'quoteAmount', type: 'uint256', indexed: false }, { name: 'feeToPlatform', type: 'uint256', indexed: false },
+  ] },
+  { type: 'event', name: 'Refunded', inputs: [
+    { name: 'token', type: 'address', indexed: true }, { name: 'user', type: 'address', indexed: true },
+    { name: 'amount', type: 'uint256', indexed: false },
+  ] },
+  { type: 'function', name: 'mint', stateMutability: 'nonpayable', inputs: [{ name: 'token', type: 'address' }, { name: 'shares', type: 'uint256' }, { name: 'minShares', type: 'uint256' }], outputs: [{ type: 'uint256' }] },
+  { type: 'function', name: 'refund', stateMutability: 'nonpayable', inputs: [{ name: 'token', type: 'address' }], outputs: [{ type: 'uint256' }] },
+  { type: 'function', name: 'status', stateMutability: 'view', inputs: [{ name: 'token', type: 'address' }], outputs: [{ type: 'uint8' }] },
+  { type: 'function', name: 'previewMint', stateMutability: 'view', inputs: [{ name: 'token', type: 'address' }, { name: 'user', type: 'address' }, { name: 'shares', type: 'uint256' }], outputs: [{ name: 'accepted', type: 'uint256' }, { name: 'cost', type: 'uint256' }, { name: 'fee', type: 'uint256' }] },
+  { type: 'function', name: 'baselineOf', stateMutability: 'view', inputs: [{ name: 'token', type: 'address' }, { name: 'user', type: 'address' }], outputs: [{ type: 'uint256' }] },
+  { type: 'function', name: 'holdBpsOf', stateMutability: 'view', inputs: [{ name: 'token', type: 'address' }], outputs: [{ type: 'uint16' }] },
+  { type: 'function', name: 'sales', stateMutability: 'view', inputs: [{ name: 'token', type: 'address' }], outputs: [
+    { name: 'creator', type: 'address' }, { name: 'deadline', type: 'uint64' }, { name: 'capShares', type: 'uint16' },
+    { name: 'holdBps', type: 'uint16' }, { name: 'quote', type: 'address' }, { name: 'sold', type: 'uint16' },
+    { name: 'launched', type: 'bool' }, { name: 'failed', type: 'bool' }, { name: 'mintFeeBps', type: 'uint16' },
+    { name: 'exitFeeBps', type: 'uint16' }, { name: 'gate', type: 'address' }, { name: 'sharePrice', type: 'uint128' },
+    { name: 'escrowedFee', type: 'uint128' }, { name: 'pair', type: 'address' }, { name: 'refPool', type: 'address' },
+  ] },
+  ...['UnknownToken', 'NotMinting', 'NotFailed', 'ZeroAmount', 'BadAmount', 'Slippage', 'WalletCapReached', 'NothingToRefund', 'NotAgent', 'FeeOnTransferQuote'].map((name) => ({ type: 'error', name, inputs: [] })),
+]
+
+/** Fair sale status enum (FairMintPad.Status). */
+export const FAIR_STATUS = ['None', 'Minting', 'Launched', 'Failed']

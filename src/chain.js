@@ -52,14 +52,17 @@ export const calldata = {
   }),
 }
 
-/** Historical Created logs (testnet replay / backfill after a WSS gap). */
-export async function createdLogs(client, pad, fromBlock, toBlock, chunk = 5000n) {
+/** Historical logs of one event on `address`, decoded by `parse` (backfill after a WSS gap, replay). */
+export async function logsFor(client, address, topic, parse, fromBlock, toBlock, chunk = 5000n) {
   const out = []
-  // public RPCs cap the getLogs range; walk it in chunks
+  // public RPCs cap the getLogs range; walk it in chunks. topic0 is re-checked locally: some RPCs ignore the filter
   for (let b = fromBlock; b <= toBlock; b += chunk) {
     const to = b + chunk - 1n > toBlock ? toBlock : b + chunk - 1n
-    const logs = await client.getLogs({ address: pad, fromBlock: b, toBlock: to })
-    out.push(...logs.filter((l) => l.topics[0]?.toLowerCase() === CREATED_TOPIC).map(parseCreated))
+    const logs = await client.getLogs({ address, fromBlock: b, toBlock: to, topics: [topic] })
+    out.push(...logs.filter((l) => l.topics[0]?.toLowerCase() === topic.toLowerCase()).map(parse).filter(Boolean))
   }
   return out
 }
+
+/** Historical V3 Created logs (testnet replay). */
+export const createdLogs = (client, pad, fromBlock, toBlock, chunk) => logsFor(client, pad, CREATED_TOPIC, parseCreated, fromBlock, toBlock, chunk)

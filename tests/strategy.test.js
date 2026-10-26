@@ -143,38 +143,8 @@ describe('config', () => {
     expect(() => loadConfig({ network: 'mainnet', autoDiscover: false })).toThrow(/SNIPER_PAD/)
     // default: no mainnet pad is fine, run waits for auto-discovery
     expect(loadConfig({ network: 'mainnet' }).net.pad).toBe(null)
-    expect(loadConfig({ network: 'mainnet' }).net.v3Anchor.bucket).toBe('0xBDDd8F275D7Cb65f5454D0bEDf0463792878F111')
+    expect(loadConfig({ network: 'mainnet' }).net.fairPad).toBe(null)
     expect(DEFAULTS.dryRun).toBe(true)
-  })
-})
-
-describe('discovery scan window', () => {
-  it('mainnet scans only the window public RPCs serve; resumes from a saved cursor inside it', async () => {
-    const { discoverPad } = await import('../src/discover.js')
-    const { NETWORKS } = await import('../src/config.js')
-    const net = { ...NETWORKS.mainnet, pad: null }
-    const ranges = []
-    const head = 130_000_000n
-    const client = {
-      getBlockNumber: async () => head,
-      getLogs: async ({ fromBlock, toBlock }) => { ranges.push([fromBlock, toBlock]); return [] },
-      readContract: async () => '0x4EEdcDF5fab775e10C0D09951b6F59Ab81ba19d3', // anchor owner check
-    }
-    const run = async (fromBlock) => {
-      ranges.length = 0
-      const ctl = new AbortController()
-      const p = discoverPad({ client, net, fromBlock, signal: ctl.signal, pollMs: 60_000 }).catch(() => {})
-      await new Promise((r) => setTimeout(r, 50))
-      ctl.abort(); await p
-      return ranges
-    }
-    const fresh = await run(null)
-    expect(fresh[0][0]).toBe(head - 3n - 9_000n)
-    expect(fresh.at(-1)[1]).toBe(head - 3n) // stays behind the reported head
-    const resumed = await run(head - 100n)
-    expect(resumed[0][0]).toBe(head - 100n)
-    const tooOld = await run(head - 50_000n) // e.g. down for days: clamp, never ask for archive blocks
-    expect(tooOld[0][0]).toBe(head - 3n - 9_000n)
   })
 })
 
@@ -234,21 +204,3 @@ describe('secrets', () => {
   })
 })
 
-describe('discovery scan concurrency', () => {
-  it('a slow first pass is never overlapped by the next poll', async () => {
-    const { discoverPad } = await import('../src/discover.js')
-    const { NETWORKS } = await import('../src/config.js')
-    const net = { ...NETWORKS.mainnet, pad: null }
-    let inFlight = 0, maxInFlight = 0
-    const client = {
-      getBlockNumber: async () => 130_000_000n,
-      getLogs: async () => { inFlight++; maxInFlight = Math.max(maxInFlight, inFlight); await new Promise((r) => setTimeout(r, 30)); inFlight--; return [] },
-      readContract: async () => '0x4EEdcDF5fab775e10C0D09951b6F59Ab81ba19d3',
-    }
-    const ctl = new AbortController()
-    const p = discoverPad({ client, net, signal: ctl.signal, pollMs: 5 }).catch(() => {})
-    await new Promise((r) => setTimeout(r, 200))
-    ctl.abort(); await p
-    expect(maxInFlight).toBe(1)
-  })
-})

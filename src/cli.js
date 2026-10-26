@@ -3,7 +3,7 @@ import { createInterface } from 'node:readline/promises'
 import { writeFileSync, mkdirSync, existsSync, readFileSync } from 'node:fs'
 import { formatUnits, parseUnits, maxUint256 } from 'viem'
 import { loadConfig as loadConfigRaw, SIZE_PRESETS, EXIT_PRESETS, DEFAULTS, CONFIG_FILE, DATA_DIR, SECRETS_FILE, exitRule, quoteAddresses, quoteKey, redact } from './config.js'
-import { checkAnchor, fingerprintV3, discoverPad } from './discover.js'
+import { fingerprint, discoverPad, candidates } from './discover.js'
 import { makeClient, isAgent, balanceOf, allowance, calldata, createdLogs, readCurve } from './chain.js'
 import { bawAddress, bawStatus, bawSettings, bawSend, useBawBin, bawBin, bawInteractive, requireBaw } from './baw.js'
 import { Sniper } from './sniper.js'
@@ -104,19 +104,19 @@ async function doctorCmd() {
     secrets: existsSync(SECRETS_FILE) ? SECRETS_FILE : 'none (public nodes)',
     dryRun: cfg.dryRun, size: `${cfg.size}%`, exit: exitRule(cfg), issues: [],
   }
-  if (cfg.net.v3Anchor) {
-    const anchorErr = await checkAnchor(client, cfg.net)
-    out.anchor = { bucket: cfg.net.v3Anchor.bucket, owner: cfg.net.v3Anchor.owner, ok: !anchorErr }
-    if (anchorErr) out.issues.push(`自动发现的信任锚异常：${anchorErr}`)
+  out.fair = cfg.fair.enabled ? { maxSales: cfg.fair.maxSales, shares: cfg.fair.shares, maxSpend: cfg.fair.maxSpend, sellPctOnLaunch: cfg.fair.sellPctOnLaunch, keepReward: cfg.fair.keepReward } : 'off'
+  for (const [kind, pad] of [['v3', cfg.net.pad], ['fair', cfg.fair.enabled ? cfg.net.fairPad : undefined]]) {
+    if (pad === undefined) continue
+    if (!pad) {
+      out[`${kind}Pad`] = cfg.autoDiscover ? 'not found yet: `run` waits for it (gang.fun config / repo broadcast / npm CLI)' : null
+      if (!cfg.autoDiscover) out.issues.push(`没有 ${kind} 地址且 autoDiscover 关闭`)
+      continue
+    }
+    const fp = await fingerprint(client, pad, cfg.net, kind)
+    out[`${kind}Pad`] = { address: pad, ok: fp.ok, reasons: fp.reasons, owner: fp.facts.owner, tokenCount: fp.facts.tokenCount }
+    if (!fp.ok) out.issues.push(`${kind} pad 指纹不符：${fp.reasons.join('；')}`)
   }
-  if (!cfg.net.pad) {
-    out.pad = cfg.autoDiscover ? 'not found yet: `run` waits for it (auto-discovery)' : null
-    if (!cfg.autoDiscover) out.issues.push('没有 V3 地址且 autoDiscover 关闭')
-  } else if (cfg.net.v3Anchor) {
-    const fp = await fingerprintV3(client, cfg.net.pad, cfg.net)
-    out.padFingerprint = { ok: fp.ok, reasons: fp.reasons, owner: fp.facts.owner, tokenCount: fp.facts.tokenCount }
-    if (!fp.ok) out.issues.push(`pad 指纹不符：${fp.reasons.join('；')}`)
-  }
+  delete out.pad
   out.bawStatus = await bawStatus()
   if (out.bawStatus !== 'CONNECTED') {
     out.issues.push(`钱包未登录：${bawBin()} auth signin`)
@@ -150,7 +150,7 @@ async function doctorCmd() {
   }
   out.wssProbe = []
   for (const u of cfg.net.wss.split(',').map((x) => x.trim()).filter(Boolean)) {
-    const r = await probeWss(u, cfg.net.pad || cfg.net.v3Anchor?.bucket)
+    const r = await probeWss(u, cfg.net.pad || cfg.net.fairPad || cfg.net.wbnb)
     out.wssProbe.push({ ...r, url: redact(u), ...(r.error && { error: redact(r.error) }) })
   }
   if (!out.wssProbe.some((r) => r.ok)) out.issues.push('所有 WSS 订阅都失败')
@@ -222,7 +222,12 @@ async function statusCmd() {
     }
     rows.push(row)
   }
-  print({ daily: st.daily, positions: rows })
+  const fairRows = Object.values(st.fair?.positions || {}).map((p) => ({
+    token: p.token, symbol: p.symbol, status: p.status, shares: p.shares, cost: p.cost && fmt(p.cost), fee: p.fee && fmt(p.fee),
+    soldOnLaunch: p.launchSold && /^\d+$/.test(p.launchSold) ? fmt(p.launchSold) : p.launchSold, proceeds: p.launchProceeds && fmt(p.launchProceeds),
+    deadline: p.deadline && new Date(p.deadline * 1000).toISOString(),
+  }))
+  print({ daily: st.daily, positions: rows, fair: fairRows })
 }
 
 async function sellCmd() {
@@ -265,25 +270,27 @@ async function replayCmd() {
 }
 
 /** One-shot: look for the V3 pad from the anchor bucket's history, print it, save it. */
+/** Look for the V3 / 打新 pads now (gang's published addresses + fingerprint), print and save what is found. */
 async function discoverCmd() {
-  const cfg = loadConfig({ pad: null })
-  const net = { ...cfg.net, pad: null }
-  if (!net.v3Anchor) throw new Error(`no discovery anchor for ${cfg.network}`)
+  const cfg = loadConfig({ pad: null, fairPad: null })
+  const net = { ...cfg.net, pad: null, fairPad: null }
   const client = makeClient(net)
-  // default: the recent window the public RPC still serves; --from only helps with an archive SNIPER_RPC
-  const fromBlock = opt('from') ? BigInt(opt('from')) : null
   const follow = args.includes('--follow')
+  const kinds = opt('kind') ? [opt('kind')] : ['v3', 'fair']
   const ctl = new AbortController()
-  if (!follow) setTimeout(() => ctl.abort(), Number(opt('timeout', '60')) * 1000)
-  try {
-    const found = await discoverPad({ client, net, fromBlock, signal: ctl.signal })
-    const { savePad } = await import('./config.js')
-    if (!args.includes('--no-save')) savePad(cfg.network, found.pad, { operatorTx: found.event.txHash, operatorBlock: found.event.blockNumber, owner: found.facts.owner })
-    print({ found: true, pad: found.pad, operatorTx: found.event.txHash, block: found.event.blockNumber, facts: found.facts, saved: !args.includes('--no-save') })
-  } catch (e) {
-    if (e.message !== 'discovery aborted') throw e
-    print({ found: false, scannedFrom: fromBlock ?? 'last ~9000 blocks', note: 'no bucket operator passes the V3 fingerprint yet; `run` keeps watching (or `discover --follow`)' })
-  }
+  if (!follow) setTimeout(() => ctl.abort(), Number(opt('timeout', '30')) * 1000)
+  const { savePad } = await import('./config.js')
+  const results = await Promise.all(kinds.map(async (kind) => {
+    try {
+      const found = await discoverPad({ client, net, kind, signal: ctl.signal })
+      if (!args.includes('--no-save')) savePad(cfg.network, kind, found.pad, { source: found.source, owner: found.facts.owner })
+      return { kind, found: true, pad: found.pad, source: found.source, owner: found.facts.owner, pendingOwner: found.facts.pendingOwner, tokenCount: found.facts.tokenCount }
+    } catch (e) {
+      if (e.message !== 'discovery aborted') throw e
+      return { kind, found: false, published: await candidates(net, kind), note: 'nothing published that passes the fingerprint yet; `run` keeps watching (or `discover --follow`)' }
+    }
+  }))
+  print({ network: cfg.network, results })
   process.exit(0)
 }
 
@@ -293,10 +300,10 @@ const HELP = `gang-sniper ${VERSION} — gang.fun LaunchpadV3 狙击器（币安
   gang-sniper config               交互设置：买入档位 / 卖出规则 / 计价币 / 税上限 / 滑点 / 限额 / 实盘或 dry-run
   gang-sniper presets              列出买入档位和卖出规则
   gang-sniper prepare [--wrap 0.3] BNB 换 WBNB；V3 地址已知时授权（额度 = 每日预算）
-  gang-sniper run                  开始狙击（没有 V3 地址时先自动发现）
-  gang-sniper status               持仓和实时估值
+  gang-sniper run                  开始（V3 狙击 + 打新；没有地址时先自动发现）
+  gang-sniper status               V3 持仓、实时估值和打新仓位
   gang-sniper sell <币地址> [--pct 100]   手动卖出
-  gang-sniper discover [--follow]  只查找 V3 地址并保存
+  gang-sniper discover [--follow] [--kind v3|fair]  只查找 V3 / 打新地址并保存
   gang-sniper wallet <baw 参数>    用配置的 baw（bawBin / SNIPER_BAW）执行，例如 wallet wallet balance --binanceChainId 56
   gang-sniper replay [--from 块号]  测试网：把历史 Created 事件过一遍下单逻辑（SNIPER_NETWORK=testnet）
 

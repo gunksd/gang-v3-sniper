@@ -6,7 +6,7 @@
  * handed over with `backfilled: true` so the caller can skip stale tokens.
  */
 import { CREATED_TOPIC } from './abi.js'
-import { parseCreated, createdLogs } from './chain.js'
+import { parseCreated, logsFor } from './chain.js'
 import { log } from './log.js'
 import { redact } from './config.js'
 
@@ -36,7 +36,8 @@ export function listenCreated({ urls, pad, client, onCreated, reconnectMs = 1500
       // a few blocks behind: load-balanced RPC nodes lag each other; the live subscription delivers the newest ones
       const head = (await client.getBlockNumber()) - 3n
       if (from > head) return
-      const evs = await createdLogs(client, pad, from, head)
+      // this listener's own event (V3 Created, 打新 Created / Launched …), not always V3 Created
+      const evs = await logsFor(client, pad, topic, parse, from, head)
       for (const ev of evs) deliver(ev, { source: 'backfill', backfilled: true, head })
       if (lastBlock == null || head > lastBlock) lastBlock = head
     } catch (e) {

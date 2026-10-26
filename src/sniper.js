@@ -9,8 +9,9 @@ import { readCurve, balanceOf, allowance, calldata, poolAmountOut } from './chai
 import { simulateSell, progressPct } from './curve.js'
 import { planBuy, checkTax, evaluateExit, minOut, pullPerBuy } from './strategy.js'
 import { exitRule, quoteAddresses, quoteKey, savePad } from './config.js'
-import { discoverPad, fingerprintV3 } from './discover.js'
-import { bawSend, bawPreview, bawExecute, bawStatus, bawSettings } from './baw.js'
+import { discoverPad, fingerprint } from './discover.js'
+import { FairSniper } from './fair.js'
+import { bawSend, bawPreview, bawExecute, bawStatus, bawSettings, bawBin } from './baw.js'
 import { loadState, saveState, markSniped, addSpend, adjustSpend, putPosition, openPositions, rollDay } from './state.js'
 import { listenCreated } from './listener.js'
 import { log } from './log.js'
@@ -53,12 +54,12 @@ export class Sniper {
   }
 
   async refreshFunds() {
-    if (!this.pad) return
+    // the balance is shared by V3 and 打新, so it's kept current even before the V3 pad exists; allowance is V3's
     for (const q of quoteAddresses(this.cfg)) {
       try {
-        const [b, a] = await Promise.all([balanceOf(this.client, q, this.me), allowance(this.client, q, this.me, this.pad)])
+        const [b, a] = await Promise.all([balanceOf(this.client, q, this.me), this.pad ? allowance(this.client, q, this.me, this.pad) : 0n])
         this.funds.set(q, { balance: b, allowance: a })
-        if (!this.canExecute) continue
+        if (!this.canExecute || !this.pad) continue
         const pull = pullPerBuy(this.cfg, quoteKey(this.cfg, q))
         const avail = this.available(q)
         // keep the bounded approval ≥ two buys so a snipe never waits on an approve tx
@@ -315,72 +316,78 @@ export class Sniper {
 
   // ------------------------------------------------------------------ run
   /**
-   * Resolve the pad: configured → re-verified; missing → discovered on-chain from the anchor bucket.
-   * Returns the block to start listening from.
+   * A pad for `kind` ('v3' | 'fair'): configured → verified; missing → discovered from gang's published addresses.
+   * Resolves the address, or null when it can't be had (auto-discovery off).
    */
-  async resolvePad() {
+  async resolve(kind) {
     const net = this.cfg.net
-    if (this.pad) {
-      if (!net.v3Anchor) return (await this.client.getBlockNumber()) + 1n
-      const fp = await fingerprintV3(this.client, this.pad, net)
-      if (!fp.ok) {
-        // a pad typed in by hand is the user's call; a discovered one must keep passing
-        if (!this.cfg.pad) throw new Error(`stored V3 pad ${this.pad} no longer passes the fingerprint: ${fp.reasons.join('; ')}`)
-        log('pad_warning', { pad: this.pad, reasons: fp.reasons })
-      } else log('pad_verified', { pad: this.pad, tokenCount: fp.facts.tokenCount, owner: fp.facts.owner })
-      return (await this.client.getBlockNumber()) + 1n
+    const known = kind === 'v3' ? net.pad : net.fairPad
+    const byHand = kind === 'v3' ? this.cfg.pad : this.cfg.fairPad
+    if (known) {
+      const fp = await fingerprint(this.client, known, net, kind)
+      if (fp.ok) log('pad_verified', { kind, pad: known, owner: fp.facts.owner, tokenCount: fp.facts.tokenCount })
+      // typed in by hand: the user's call; discovered earlier: it must keep passing
+      else if (byHand) log('pad_warning', { kind, pad: known, reasons: fp.reasons })
+      else throw new Error(`stored ${kind} pad ${known} no longer passes the fingerprint: ${fp.reasons.join('; ')}`)
+      return known
     }
-    if (!this.cfg.autoDiscover || !net.v3Anchor) throw new Error('no V3 pad and auto-discovery is off')
-    log('v3_waiting', { anchorBucket: net.v3Anchor.bucket, anchorOwner: net.v3Anchor.owner, how: 'first OperatorUpdated(x,true) on the bucket whose x passes the LaunchpadV3 fingerprint' })
-    this.discovery = new AbortController()
-    const fromBlock = this.state.discoverCursor?.[this.cfg.network] != null ? BigInt(this.state.discoverCursor[this.cfg.network]) : null
-    const found = await discoverPad({
-      client: this.client, net, fromBlock, signal: this.discovery.signal,
-      // resume point across restarts: a sniper that was down < ~8h misses nothing
-      onCursor: (c) => this.persist({ ...this.state, discoverCursor: { ...this.state.discoverCursor, [this.cfg.network]: c.toString() } }),
-    })
-    this.pad = found.pad
-    this.cfg = { ...this.cfg, net: { ...net, pad: found.pad } }
-    savePad(this.cfg.network, found.pad, { operatorTx: found.event.txHash, operatorBlock: found.event.blockNumber, owner: found.facts.owner, router: found.facts.router })
-    log('v3_discovered', { pad: found.pad, operatorTx: found.event.txHash, block: found.event.blockNumber, router: found.facts.router, migrator: found.facts.migrator, owner: found.facts.owner, tokenCount: found.facts.tokenCount })
+    if (!this.cfg.autoDiscover) return null
+    log('discover_waiting', { kind, sources: ['gang.fun /api/' + kind + '/config', 'repo broadcast', 'npm @gangfun/cli'] })
+    const found = await discoverPad({ client: this.client, net, kind, signal: this.discovery.signal })
+    savePad(this.cfg.network, kind, found.pad, { source: found.source, owner: found.facts.owner, pendingOwner: found.facts.pendingOwner, migrator: found.facts.migrator, bucket: found.facts.platformBucket })
+    log('discovered', { kind, pad: found.pad, source: found.source, owner: found.facts.owner, pendingOwner: found.facts.pendingOwner, tokenCount: found.facts.tokenCount })
+    return found.pad
+  }
+
+  /** V3 bonding-curve sniping on `pad`. */
+  async startV3(pad) {
+    this.pad = pad
+    this.cfg = { ...this.cfg, net: { ...this.cfg.net, pad } }
     if (this.canExecute && this.cfg.autoPrepare) {
       for (const q of quoteAddresses(this.cfg)) await this.approveQuote(q).catch((e) => log('approve_error', { quote: q, error: e.message }))
     }
-    // Created events between the operator tx and now come back through the listener's backfill (stale ones skipped)
-    return found.event.blockNumber
+    await this.refreshFunds()
+    const fromBlock = (await this.client.getBlockNumber()) + 1n
+    const urls = this.cfg.net.wss.split(',').map((s) => s.trim()).filter(Boolean)
+    this.listener = listenCreated({
+      urls, pad, client: this.client, reconnectMs: this.cfg.reconnectMs, fromBlock,
+      onCreated: (ev, meta) => this.onCreated(ev, meta).catch((e) => log('snipe_error', { token: ev.token, error: e.message })),
+    })
+    log('v3_watching', { pad, size: `${this.cfg.size}%`, buyQuoteIn: this.cfg.buyQuoteIn, exit: this.rule, openPositions: openPositions(this.state).length })
+  }
+
+  /** 打新 on `pad`. */
+  async startFair(pad) {
+    this.cfg = { ...this.cfg, net: { ...this.cfg.net, fairPad: pad } }
+    this.fair = new FairSniper(this, pad)
+    await this.fair.start((await this.client.getBlockNumber()) + 1n)
   }
 
   async start() {
-    // before resolvePad(): discovery can wait for days, and baw signs out after 48h without use
+    // keepalive first: discovery can wait for days, and baw signs out after 48h without use
     const keepalive = () => this.bawHealth().catch((e) => log('baw_health_error', { error: e.message }))
     keepalive()
-    this.bawTimer = setInterval(keepalive, 60 * 60 * 1000)
-    // wrap BNB → WBNB ahead of time too, so the first snipe after discovery doesn't wait on it
-    if (!this.pad) {
-      this.prewrap()
-      this.prewrapTimer = setInterval(() => this.prewrap(), 60_000)
-    }
-    const fromBlock = await this.resolvePad()
-    clearInterval(this.prewrapTimer)
-    await this.refreshFunds()
-    log('start', {
-      network: this.cfg.network, pad: this.pad, wallet: this.me, dryRun: !this.canExecute, size: `${this.cfg.size}%`, exit: this.rule,
-      quotes: quoteAddresses(this.cfg), funds: Object.fromEntries([...this.funds].map(([q, f]) => [q, { balance: fmt(f.balance), approved: f.allowance > maxUint256 / 2n ? 'max' : fmt(f.allowance) }])),
-      openPositions: openPositions(this.state).length,
-    })
-    const urls = this.cfg.net.wss.split(',').map((s) => s.trim()).filter(Boolean)
-    this.listener = listenCreated({
-      urls, pad: this.pad, client: this.client, reconnectMs: this.cfg.reconnectMs, fromBlock,
-      onCreated: (ev, meta) => this.onCreated(ev, meta).catch((e) => log('snipe_error', { token: ev.token, error: e.message })),
-    })
+    // every 10 min: keeps the session in use (48h idle sign-out) and surfaces a revoked session quickly
+    this.bawTimer = setInterval(keepalive, 10 * 60 * 1000)
+    this.prewrap()
+    this.prewrapTimer = setInterval(() => this.prewrap(), 60_000)
     this.exitTimer = setInterval(() => this.checkExits(), this.cfg.pollExitSec * 1000)
     this.fundsTimer = setInterval(() => this.refreshFunds(), 30_000)
+    log('start', { network: this.cfg.network, wallet: this.me, dryRun: !this.canExecute, v3: this.cfg.net.pad || 'discovering', fair: this.cfg.fair.enabled ? (this.cfg.net.fairPad || 'discovering') : 'off' })
+
+    // V3 and 打新 come up independently: one pad appearing before the other must not wait for it
+    this.discovery = new AbortController()
+    const run = (kind, go) => this.resolve(kind)
+      .then((pad) => (pad ? go(pad) : log('pad_unavailable', { kind, reason: 'no address and autoDiscover is off' })))
+      .catch((e) => { if (e.message !== 'discovery aborted') log('pad_error', { kind, error: e.message }) })
+    run('v3', (pad) => this.startV3(pad))
+    if (this.cfg.fair.enabled) run('fair', (pad) => this.startFair(pad))
   }
 
   async bawHealth() {
     if (!this.cfg.net.bawChainId) return
     const status = await bawStatus()
-    if (status !== 'CONNECTED') return log('baw_disconnected', { status, fix: 'baw auth signin' })
+    if (status !== 'CONNECTED') return log('baw_disconnected', { status, baw: bawBin(), fix: `${bawBin()} auth signin`, effect: 'no buys or sells can be signed until then' })
     const s = await bawSettings()
     const devLeftH = s.devMode?.expiresAt ? (Date.parse(s.devMode.expiresAt) - Date.now()) / 3_600_000 : null
     const fields = { devMode: s.devMode?.enabled, devModeExpiresAt: s.devMode?.expiresAt, devModeDailyLimitUsd: s.devMode?.dailyLimit, quotaLeftUsd: s.quotaLeft, signOutAt: s.inactiveSignOutTime }
@@ -394,6 +401,7 @@ export class Sniper {
     clearInterval(this.prewrapTimer)
     this.discovery?.abort()
     this.listener?.stop()
+    this.fair?.stop()
     clearInterval(this.exitTimer)
     clearInterval(this.fundsTimer)
   }

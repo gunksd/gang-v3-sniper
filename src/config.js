@@ -10,34 +10,43 @@ import { homedir } from 'node:os'
 export const DATA_DIR = resolve(process.env.SNIPER_DATA_DIR || join(homedir(), '.gang-sniper'))
 export const CONFIG_FILE = resolve(DATA_DIR, 'config.json')
 
+const GANG_SOURCES = {
+  site: 'https://gang.fun/api',
+  repoRaw: 'https://raw.githubusercontent.com/gangfun/gang-launchpad/main',
+  npmPackage: '@gangfun/cli',
+}
+
 export const NETWORKS = {
   mainnet: {
     chainId: 56,
     bawChainId: '56',
-    // LaunchpadV3 mainnet address is not published yet (2026-10-26: testnet only). Set SNIPER_PAD when it is.
+    // pads are found by discovery (src/discover.js) or set by hand: SNIPER_PAD (V3) / SNIPER_FAIR_PAD (打新)
     pad: null,
+    fairPad: null,
     wss: 'wss://bsc-rpc.publicnode.com',
     rpc: 'https://bsc-rpc.publicnode.com',
     wbnb: '0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c',
     usdt: '0x55d398326f99059fF775485246999027B3197955',
     router: '0x10ED43C718714eb63d5aA57B78B54704E256024E',
-    // Agent ID NFT the V3 pad gates on (DeployLaunchpadV3: LaunchpadV3MainnetRefs.AGENT_ID_REGISTRY, same as V2)
+    // Agent ID NFT both pads gate on (LaunchpadV3MainnetRefs / FairMintDeployRefs AGENT_ID_REGISTRY)
     agentIdRegistry: '0x60B9262456dE011F7d15a54CdD8c48bAaa8B022F',
-    // auto-discovery anchor: the live V2 PlatformFeeBucket that DeployLaunchpadV3 reuses on mainnet. Only its owner
-    // (gang team EOA, docs/MAINNET-LAUNCHPAD-V2-ADDRESSES-2026-10-23.md) can make a pad an operator.
-    v3Anchor: { bucket: '0xBDDd8F275D7Cb65f5454D0bEDf0463792878F111', owner: '0x4EEdcDF5fab775e10C0D09951b6F59Ab81ba19d3' },
+    // GangBuybackBurner (owner = gang team 0x4EEd…): the new shared fee bucket copies it from the V2 bucket (runbook §0)
+    gangBurner: '0x38120bf40F8F19E6cc60622Bc7C5B005dfe5363B',
+    sources: GANG_SOURCES,
   },
   testnet: {
     chainId: 97,
     bawChainId: null, // baw has no BSC testnet: listen + quote only, never execute
-    pad: '0xFFE9a823FbA62d0a77d4f8bB83965299b5664395',
+    pad: null,
+    fairPad: null,
     wss: 'wss://bsc-testnet-rpc.publicnode.com',
     rpc: 'https://bsc-testnet-rpc.publicnode.com',
     wbnb: '0xae13d989daC2f0dEbFf460aC112a837C89BAa7cd',
     usdt: null,
     router: '0xD99D1c33F9fC3444f8101754aBC46c52416550D1',
-    // testnet stack deployed its own bucket (owner = deployer); used to test discovery against the real V3 pad
-    v3Anchor: { bucket: '0xDD649e7F74aD1719b81454D4612fCC062722836b', owner: '0xCa8e63434072B40d3dFE6f5e7Fd885F93A3200b6', fromBlock: 139006483n, maxLookback: null }, // testnet RPC serves old logs
+    agentIdRegistry: '0x24D0A2106AC3Ebf7d770d19f4aF0a5149ebe5B2a', // TestnetAgentId
+    gangBurner: null, // testnet bucket has no buyback
+    sources: GANG_SOURCES,
   },
 }
 
@@ -86,7 +95,19 @@ export const DEFAULTS = {
   // which baw binary signs: 'baw' = this machine's default wallet; a per-wallet wrapper such as ~/.baw2-cli/bin/baw
   // (sets BINANCE_BAW_DIR) selects another one. SNIPER_BAW overrides.
   bawBin: 'baw',
-  autoDiscover: true, // no pad configured → watch the anchor bucket and fill the V3 address in automatically
+  autoDiscover: true, // no pad configured → find the V3 / 打新 pads from gang's published addresses (src/discover.js)
+  // 打新 (fair mint): every sale has one price, so speed only matters for getting in before it fills
+  fair: {
+    enabled: true,
+    maxSales: 1, // how many sales to auto-mint in total (0 = off); counted across restarts
+    shares: 'cap', // 'cap' = the per-wallet maximum the sale allows, or a number of shares
+    maxSpend: { wbnb: '0.6' }, // principal + mint fee per sale, quote units
+    maxMintFeeBps: 500, // skip sales whose mint fee is above this (creator picks 1%–5%)
+    sellPctOnLaunch: 50, // sell this share of the minted tokens right after the sale launches
+    keepReward: true, // never sell below the sale's hold line: below it the holder reward is lost for good
+    sellSlippagePct: 5,
+    autoRefund: true, // deadline passed without a fill → claim principal + fee back
+  },
   autoPrepare: true, // after discovery (live mode only): approve the pad for dailyBudgetQuote, not unlimited
   pollExitSec: 5,
   reconnectMs: 1500,
@@ -104,6 +125,7 @@ export function loadConfig(overrides = {}) {
     network: process.env.SNIPER_NETWORK,
     autoDiscover: process.env.SNIPER_AUTO_DISCOVER != null ? process.env.SNIPER_AUTO_DISCOVER !== '0' : undefined,
     pad: process.env.SNIPER_PAD,
+    fairPad: process.env.SNIPER_FAIR_PAD,
     size: process.env.SNIPER_SIZE,
     exit: process.env.SNIPER_EXIT,
     bawBin: process.env.SNIPER_BAW,
@@ -111,7 +133,8 @@ export function loadConfig(overrides = {}) {
     slippagePct: envJson('SNIPER_SLIPPAGE'),
   }
   const clean = (o) => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined))
-  const cfg = { ...DEFAULTS, ...file, ...clean(env), ...clean(overrides) }
+  const merged = { ...DEFAULTS, ...file, ...clean(env), ...clean(overrides) }
+  const cfg = { ...merged, fair: { ...DEFAULTS.fair, ...(file.fair || {}), ...(overrides.fair || {}) } }
   const net = NETWORKS[cfg.network]
   if (!net) throw new Error(`unknown network ${cfg.network} (mainnet | testnet)`)
   const secret = cfg.network === 'mainnet' ? loadSecrets() : {}
@@ -119,16 +142,14 @@ export function loadConfig(overrides = {}) {
   // private node first (it serves archive logs), the public one stays subscribed too as a second, independent feed
   const wss = process.env.SNIPER_WSS || [...secretWss, net.wss].join(',')
   const rpc = process.env.SNIPER_RPC || secret.rpc || net.rpc
-  const archive = !!(process.env.SNIPER_RPC || secret.rpc)
   const resolved = {
     ...cfg,
     net: {
       ...net,
-      pad: cfg.pad || cfg.discovered?.[cfg.network]?.pad || net.pad,
+      pad: cfg.pad || cfg.discovered?.[cfg.network]?.v3?.pad || net.pad,
+      fairPad: cfg.fairPad || cfg.discovered?.[cfg.network]?.fair?.pad || net.fairPad,
       wss,
       rpc,
-      // a private/archive node serves old logs: discovery can look back days instead of the public ~9000 blocks
-      ...(archive && net.v3Anchor && { v3Anchor: { ...net.v3Anchor, maxLookback: net.v3Anchor.maxLookback === null ? null : 300_000n } }),
     },
   }
   validate(resolved)
@@ -176,8 +197,14 @@ function validate(cfg) {
     // below the cap the pad does not refund: the whole amount would buy tokens, overshooting the chosen size
     throw new Error('buyQuoteIn (fixed send + refund) only works with size 1 (the 1% wallet cap)')
   }
-  if (!cfg.net.pad && !cfg.autoDiscover) {
-    throw new Error(`no LaunchpadV3 address for ${cfg.network}: set SNIPER_PAD (or "pad" in ${CONFIG_FILE}), or enable autoDiscover`)
+  if (!cfg.net.pad && !cfg.net.fairPad && !cfg.autoDiscover) {
+    throw new Error(`no pad for ${cfg.network}: set SNIPER_PAD / SNIPER_FAIR_PAD (or "pad" / "fairPad" in ${CONFIG_FILE}), or enable autoDiscover`)
+  }
+  const f = cfg.fair
+  if (f.enabled) {
+    if (!(f.sellPctOnLaunch >= 0 && f.sellPctOnLaunch <= 100)) throw new Error('fair.sellPctOnLaunch must be 0–100')
+    if (!(f.sellSlippagePct >= 0 && f.sellSlippagePct <= 50)) throw new Error('fair.sellSlippagePct must be 0–50')
+    if (!(Number.isInteger(f.maxSales) && f.maxSales >= 0)) throw new Error('fair.maxSales must be a whole number ≥ 0')
   }
 }
 
@@ -198,10 +225,11 @@ export function quoteKey(cfg, addr) {
   return a
 }
 
-/** Persist the discovered pad for this network into ~/.gang-sniper/config.json (keeps every other setting). */
-export function savePad(network, pad, meta = {}) {
+/** Persist a discovered pad (`kind` = 'v3' | 'fair') for this network into config.json (keeps every other setting). */
+export function savePad(network, kind, pad, meta = {}) {
   mkdirSync(DATA_DIR, { recursive: true })
   const file = existsSync(CONFIG_FILE) ? JSON.parse(readFileSync(CONFIG_FILE, 'utf8')) : {}
-  const discovered = { ...(file.discovered || {}), [network]: { pad, at: new Date().toISOString(), ...meta } }
+  const prev = file.discovered?.[network] || {}
+  const discovered = { ...(file.discovered || {}), [network]: { ...prev, [kind]: { pad, at: new Date().toISOString(), ...meta } } }
   writeFileSync(CONFIG_FILE, JSON.stringify({ ...file, discovered }, (_, v) => (typeof v === 'bigint' ? v.toString() : v), 2) + '\n')
 }
