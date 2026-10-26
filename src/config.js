@@ -71,7 +71,11 @@ export const DEFAULTS = {
   maxBuyTaxBps: 300,
   maxSellTaxBps: 300,
   maxSpendQuote: { wbnb: '0.06', usdt: '50' }, // hard per-snipe cap in quote units (1% at open ≈ 0.049 WBNB)
-  dailyBudgetQuote: { wbnb: '0.5', usdt: '400' },
+  // fixed amount sent per buy (size must be 1%): the pad keeps the 1% cost, refunds the rest; null = size from preset
+  buyQuoteIn: {},
+  dailyBudgetQuote: { wbnb: '0.5', usdt: '400' }, // actual cost kept by the pad per day (refunds don't count)
+  autoWrap: true, // live: keep WBNB ≥ one buy's pull by wrapping native BNB above gasReserveBnb
+  gasReserveBnb: '0.01',
   slippagePct: 3, // vs local quote at the event block; wider = more fills when others land first
   skipCreators: [],
   onlyCreators: [], // non-empty = whitelist
@@ -137,6 +141,10 @@ function validate(cfg) {
     if (total !== 100) throw new Error(`ladder steps must add up to 100% (got ${total})`)
   }
   if (!(cfg.slippagePct >= 0 && cfg.slippagePct <= 50)) throw new Error('slippagePct must be 0–50')
+  if (Object.keys(cfg.buyQuoteIn || {}).length && sizeBps(cfg) !== 100) {
+    // below the cap the pad does not refund: the whole amount would buy tokens, overshooting the chosen size
+    throw new Error('buyQuoteIn (fixed send + refund) only works with size 1 (the 1% wallet cap)')
+  }
   if (!cfg.net.pad && !cfg.autoDiscover) {
     throw new Error(`no LaunchpadV3 address for ${cfg.network}: set SNIPER_PAD (or "pad" in ${CONFIG_FILE}), or enable autoDiscover`)
   }

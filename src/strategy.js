@@ -44,15 +44,31 @@ export function planBuy(cfg, ev, state) {
   const slip = pctBig(cfg.slippagePct)
   const full = target >= MAX_PER_WALLET
 
-  let quoteIn = full ? gross + mulBps(gross, slip) : gross
-  if (quoteIn > maxSpend) {
-    // 1%: maxSpend still buys the cap if no one is ahead; below that it is not enough for the size at all
-    if (maxSpend < gross) return { skip: 'max_spend_below_size', need: gross, maxSpend }
-    quoteIn = maxSpend
+  const fixedHuman = cfg.buyQuoteIn?.[key]
+  let quoteIn
+  if (fixedHuman != null) {
+    // fixed send: the contract keeps what the 1% cap costs at the moment the tx lands and refunds the rest, so this
+    // amount is the most we pay for 1% (it still fills when other buyers landed first, up to that price)
+    quoteIn = parseUnits(String(fixedHuman), 18)
+    if (quoteIn < gross) return { skip: 'buy_quote_in_below_open_cost', need: gross, quoteIn }
+  } else {
+    quoteIn = full ? gross + mulBps(gross, slip) : gross
+    if (quoteIn > maxSpend) {
+      // 1%: maxSpend still buys the cap if no one is ahead; below that it is not enough for the size at all
+      if (maxSpend < gross) return { skip: 'max_spend_below_size', need: gross, maxSpend }
+      quoteIn = maxSpend
+    }
   }
-  if (quoteIn > budgetLeft) return { skip: 'daily_budget', need: quoteIn, left: budgetLeft }
+  // the daily budget counts what is actually kept (cost), not what is sent; the open-price cost is the estimate
+  if (gross > budgetLeft) return { skip: 'daily_budget', need: gross, left: budgetLeft }
   const minTokensOut = target - mulBps(target, slip)
-  return { quote, key, sizeBps: bps, target, quoteIn, minTokensOut, expectedGross: gross, assumedBuyTaxBps: cfg.maxBuyTaxBps }
+  return { quote, key, sizeBps: bps, target, quoteIn, minTokensOut, expectedGross: gross, assumedBuyTaxBps: cfg.maxBuyTaxBps, fixed: fixedHuman != null }
+}
+
+/** Quote pulled per buy: the allowance has to cover this (a refund comes back as a transfer, not as allowance). */
+export function pullPerBuy(cfg, key) {
+  const v = cfg.buyQuoteIn?.[key] ?? cfg.maxSpendQuote[key]
+  return v == null ? 0n : parseUnits(String(v), 18)
 }
 
 /** Real tax from curves() vs the configured limits. */

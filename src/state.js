@@ -52,3 +52,9 @@ export function putPosition(s, pos) {
 }
 
 export const openPositions = (s) => Object.values(s.positions).filter((p) => p.status === 'open')
+
+/** Correct the day's spend (e.g. estimate → actual cost from the receipt) without counting another buy. */
+export function adjustSpend(s, key, delta) {
+  const spent = BigInt(s.daily.spent[key] || 0) + delta
+  return { ...s, daily: { ...s.daily, spent: { ...s.daily.spent, [key]: (spent < 0n ? 0n : spent).toString() } } }
+}

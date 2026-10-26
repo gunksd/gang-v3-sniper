@@ -177,3 +177,49 @@ describe('discovery scan window', () => {
     expect(tooOld[0][0]).toBe(head - 3n - 9_000n)
   })
 })
+
+describe('fixed send per buy (buyQuoteIn), refund recycled', () => {
+  const fixed = (o = {}) => cfgWith({ size: '1', buyQuoteIn: { wbnb: '0.5' }, dailyBudgetQuote: { wbnb: '1', usdt: '1' }, ...o })
+
+  it('sends exactly 0.5; at open the pad keeps ≈0.049 for 1% and refunds ≈0.451', () => {
+    const p = planBuy(fixed(), ev(), emptyState())
+    expect(p.fixed).toBe(true)
+    expect(p.quoteIn).toBe(5n * E18 / 10n)
+    const s = simulateBuy(freshCurve(15n * E18, 200, 200), p.quoteIn)
+    expect(s.tokensOut).toBe(MAX_PER_WALLET)
+    expect(Number(s.spent) / 1e18).toBeCloseTo(0.04878, 4)
+    expect(Number(s.refund) / 1e18).toBeCloseTo(0.45122, 4)
+    expect(s.tokensOut >= p.minTokensOut).toBe(true)
+  })
+
+  it('still fills 1% when 40 wallets bought first (pays more, still refunds)', () => {
+    let c = freshCurve(15n * E18, 200, 200)
+    for (let i = 0; i < 40; i++) { const b = simulateBuy(c, 10n * E18); c = { ...c, realQuote: c.realQuote + b.net, sold: c.sold + b.tokensOut } }
+    const p = planBuy(fixed(), ev(), emptyState())
+    const s = simulateBuy(c, p.quoteIn)
+    expect(s.tokensOut).toBe(MAX_PER_WALLET)
+    expect(s.refund > 0n).toBe(true)
+  })
+
+  it('daily budget counts the kept cost, so a 1 WBNB budget allows ~20 open-price snipes of 0.5 sends', () => {
+    let st = emptyState()
+    let n = 0
+    for (; n < 100; n++) {
+      const p = planBuy(fixed(), ev({ token: '0x' + (n + 1).toString(16).padStart(40, '0'), creator: '0x' + (n + 1000).toString(16).padStart(40, '0') }), st)
+      if (p.skip) { expect(p.skip).toBe('daily_budget'); break }
+      st = { ...st, daily: { ...st.daily, spent: { wbnb: (BigInt(st.daily.spent.wbnb || 0) + p.expectedGross).toString() } } }
+    }
+    expect(n).toBeGreaterThanOrEqual(19)
+    expect(n).toBeLessThanOrEqual(21)
+  })
+
+  it('pull per buy = the fixed send (allowance sizing)', async () => {
+    const { pullPerBuy } = await import('../src/strategy.js')
+    expect(pullPerBuy(fixed(), 'wbnb')).toBe(5n * E18 / 10n)
+    expect(pullPerBuy(cfgWith(), 'wbnb')).toBe(6n * E18 / 100n) // falls back to maxSpendQuote
+  })
+
+  it('refuses a fixed send below the 1% cap size (no refund there)', () => {
+    expect(() => fixed({ size: '0.5' })).toThrow(/only works with size 1/)
+  })
+})
