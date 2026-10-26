@@ -19,7 +19,7 @@ const mulBps = (x, bps) => (x * bps) / BPS
  *   rest, so other buyers landing first only cost more quote, bounded by slippage.
  * <1%: send exactly the gross for `target` and require minTokensOut = target × (1 − slippage).
  */
-export function planBuy(cfg, ev, state) {
+export function planBuy(cfg, ev, state, { wallet } = {}) {
   const quote = ev.quote.toLowerCase()
   const allowed = quoteAddresses(cfg)
   if (!allowed.includes(quote)) return { skip: 'quote_not_selected', quote }
@@ -27,6 +27,11 @@ export function planBuy(cfg, ev, state) {
   if (cfg.onlyCreators.length && !cfg.onlyCreators.map((a) => a.toLowerCase()).includes(creator)) return { skip: 'creator_not_whitelisted' }
   if (cfg.skipCreators.map((a) => a.toLowerCase()).includes(creator)) return { skip: 'creator_blacklisted' }
   if (state.sniped[ev.token.toLowerCase()]) return { skip: 'already_sniped' }
+  // total number of V3 tokens to buy, counted across restarts (dry-run plans don't count)
+  if (cfg.maxTokens != null) {
+    const bought = Object.values(state.sniped).filter((x) => !x.dryRun).length
+    if (bought >= cfg.maxTokens) return { skip: 'max_tokens_reached', bought, maxTokens: cfg.maxTokens }
+  }
   if ((state.daily.perCreator[creator] || 0) >= cfg.maxPerCreatorPerDay) return { skip: 'creator_daily_limit' }
   if (ev.gradAmt === 0n) return { skip: 'bad_grad_amount' }
 
@@ -50,6 +55,12 @@ export function planBuy(cfg, ev, state) {
     // fixed send: the contract keeps what the 1% cap costs at the moment the tx lands and refunds the rest, so this
     // amount is the most we pay for 1% (it still fills when other buyers landed first, up to that price)
     quoteIn = parseUnits(String(fixedHuman), 18)
+    // wallet below the fixed amount: send what is there, as long as it still buys the full size at open plus slippage
+    const floor = gross + mulBps(gross, slip)
+    if (wallet != null && wallet < quoteIn) {
+      if (wallet < floor) return { skip: 'wallet_below_open_cost', need: floor, have: wallet }
+      quoteIn = wallet
+    }
     if (quoteIn < gross) return { skip: 'buy_quote_in_below_open_cost', need: gross, quoteIn }
   } else {
     quoteIn = full ? gross + mulBps(gross, slip) : gross

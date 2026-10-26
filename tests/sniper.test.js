@@ -32,10 +32,10 @@ const ev = (i) => ({ token: '0x' + String(i).padStart(40, '1'), creator: '0x' + 
 describe('Sniper in-flight accounting', () => {
   beforeEach(() => { sent.length = 0 })
 
-  it('two launches back to back with 0.7 WBNB: first sends 0.5, second is skipped until the refund lands', async () => {
+  it('concurrent mode, 0.54 WBNB, two launches at once: first sends 0.5, second has only 0.04 left (< open cost) → skipped', async () => {
     const cfg = loadConfig({ network: 'mainnet', pad: PAD, dryRun: false, size: '1', buyQuoteIn: { wbnb: '0.5' }, dailyBudgetQuote: { wbnb: '1', usdt: '1' }, autoWrap: false, autoPrepare: false })
     const s = new Sniper({ cfg, client, me: '0x' + '9'.repeat(40) })
-    s.funds.set(WBNB.toLowerCase(), { balance: 7n * E18 / 10n, allowance: 10n * E18 })
+    s.funds.set(WBNB.toLowerCase(), { balance: 54n * E18 / 100n, allowance: 10n * E18 })
     await Promise.all([s.onCreated(ev(1), { source: 'test' }), s.onCreated(ev(2), { source: 'test' })])
     expect(sent.length).toBe(1)
     expect(s.inflight.get(WBNB.toLowerCase())).toBe(5n * E18 / 10n)
@@ -76,3 +76,59 @@ describe('auto-wrap guard', () => {
   })
 })
 
+
+const { bawPreview: previewMock } = await import('../src/baw.js')
+describe('sequential queue: one at a time, refund first, first N tokens', () => {
+  const bawPreview = previewMock
+  const mkClient = (receiptDelayMs, refundTo) => {
+    let balance
+    return {
+      setBalance: (b) => { balance = b },
+      readContract: vi.fn(async ({ functionName }) => (functionName === 'curves' ? curve : functionName === 'balanceOf' ? balance : 10n * E18)),
+      // the receipt: the pad kept 0.0488 of the 0.5, the refund is back
+      waitForTransactionReceipt: async () => { await new Promise((r) => setTimeout(r, receiptDelayMs)); balance = refundTo(balance); return { status: 'success', logs: [], blockNumber: 101n } },
+      getBlockNumber: async () => 100n,
+      getBalance: async () => 0n,
+    }
+  }
+
+  it('second token waits for the first receipt, then sends 0.5 again (not skipped)', async () => {
+    // earlier tests leave receipts that never resolve: let their promises go before counting
+    await new Promise((r) => setTimeout(r, 10))
+    sent.length = 0
+    bawPreview.mockClear()
+    const c = mkClient(50, (b) => b - 488n * E18 / 10_000n)
+    c.setBalance(554n * E18 / 1000n)
+    const cfg = loadConfig({ network: 'mainnet', pad: PAD, dryRun: false, size: '1', buyQuoteIn: { wbnb: '0.5' }, dailyBudgetQuote: { wbnb: '1', usdt: '1' }, sequential: true, maxTokens: 10, autoWrap: false, autoPrepare: false })
+    const s = new Sniper({ cfg, client: c, me: '0x' + '9'.repeat(40) })
+    // fresh state: other tests in this file already bought tokens (per-creator limit, sniped set)
+    s.state = { positions: {}, sniped: {}, daily: { date: new Date().toISOString().slice(0, 10), spent: {}, perCreator: {} }, fair: { positions: {} } }
+    s.funds.set(WBNB.toLowerCase(), { balance: 554n * E18 / 1000n, allowance: 10n * E18 })
+    s.onCreated(ev(11), { source: 'test' })
+    s.onCreated(ev(12), { source: 'test' })
+    await new Promise((r) => setTimeout(r, 20))
+    expect(sent.length).toBe(1) // the second is queued, not sent and not skipped
+    await new Promise((r) => setTimeout(r, 120))
+    expect(sent.length).toBe(2)
+    const sends = bawPreview.mock.calls.map(([call]) => call.data)
+    // both sends carry quoteIn = 0.5 WBNB (buy(token, quoteIn, minOut) → 2nd word)
+    for (const d of sends) expect(BigInt('0x' + d.slice(74, 138))).toBe(5n * E18 / 10n)
+  })
+
+  it('stops after maxTokens', async () => {
+    const { planBuy } = await import('../src/strategy.js')
+    const cfg = loadConfig({ network: 'mainnet', pad: PAD, size: '1', buyQuoteIn: { wbnb: '0.5' }, dailyBudgetQuote: { wbnb: '10', usdt: '1' }, maxTokens: 10 })
+    const sniped = Object.fromEntries(Array.from({ length: 10 }, (_, i) => ['0x' + String(i).padStart(40, '5'), { dryRun: false }]))
+    expect(planBuy(cfg, ev(99), { positions: {}, sniped, daily: { date: 'x', spent: {}, perCreator: {} } }).skip).toBe('max_tokens_reached')
+    const nine = Object.fromEntries(Object.entries(sniped).slice(0, 9))
+    expect(planBuy(cfg, ev(99), { positions: {}, sniped: nine, daily: { date: 'x', spent: {}, perCreator: {} } }).skip).toBeUndefined()
+  })
+
+  it('wallet below 0.5 sends what is left if it still buys 1% at open; below that skips', async () => {
+    const { planBuy } = await import('../src/strategy.js')
+    const cfg = loadConfig({ network: 'mainnet', pad: PAD, size: '1', buyQuoteIn: { wbnb: '0.5' }, dailyBudgetQuote: { wbnb: '10', usdt: '1' } })
+    const st = { positions: {}, sniped: {}, daily: { date: 'x', spent: {}, perCreator: {} } }
+    expect(planBuy(cfg, ev(98), st, { wallet: 3n * E18 / 10n }).quoteIn).toBe(3n * E18 / 10n)
+    expect(planBuy(cfg, ev(98), st, { wallet: 4n * E18 / 100n }).skip).toBe('wallet_below_open_cost')
+  })
+})

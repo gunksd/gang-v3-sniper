@@ -84,6 +84,8 @@ export const DEFAULTS = {
   maxSpendQuote: { wbnb: '0.06', usdt: '50' }, // hard per-snipe cap in quote units (1% at open ≈ 0.049 WBNB)
   // fixed amount sent per buy (size must be 1%): the pad keeps the 1% cost, refunds the rest; null = size from preset
   buyQuoteIn: {},
+  sequential: false, // one buy at a time: the next waits for the previous receipt (its refund) instead of being skipped
+  maxTokens: null, // stop after this many V3 buys in total (null = no limit; counted across restarts)
   dailyBudgetQuote: { wbnb: '0.5', usdt: '400' }, // actual cost kept by the pad per day (refunds don't count)
   autoWrap: true, // live: keep WBNB ≥ one buy's pull by wrapping native BNB above gasReserveBnb
   gasReserveBnb: '0.01',

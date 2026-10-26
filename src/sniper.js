@@ -143,7 +143,35 @@ export class Sniper {
   }
 
   // ------------------------------------------------------------------ entry
-  async onCreated(ev, meta) {
+  /**
+   * Entry for every V3 Created. With `sequential`, buys go one at a time in arrival order: the next starts only after
+   * the previous receipt (its refund is back in the wallet). Otherwise each event is handled right away.
+   */
+  onCreated(ev, meta) {
+    if (!this.cfg.sequential) return this.handleCreated(ev, meta)
+    this.queue = this.queue || []
+    this.queue.push({ ev, meta, queuedAt: Date.now() })
+    if (this.queue.length > 1 || this.draining) log('queued', { token: ev.token, symbol: ev.symbol, position: this.queue.length + (this.draining ? 1 : 0) - 1 })
+    return this.drain()
+  }
+
+  async drain() {
+    if (this.draining) return
+    this.draining = true
+    try {
+      while (this.queue.length) {
+        const { ev, meta, queuedAt } = this.queue.shift()
+        // waiting in line makes an event older: judge staleness by blocks since it was created, like a backfill
+        const head = this.queue.length || Date.now() - queuedAt > 3000 ? await this.client.getBlockNumber().catch(() => null) : null
+        const m = head != null && head - ev.blockNumber > STALE_BLOCKS ? { ...meta, backfilled: true, head } : meta
+        await this.handleCreated(ev, m, { waitForReceipt: true }).catch((e) => log('snipe_error', { token: ev.token, error: e.message }))
+      }
+    } finally {
+      this.draining = false
+    }
+  }
+
+  async handleCreated(ev, meta, { waitForReceipt = false } = {}) {
     const t0 = Date.now()
     this.state = rollDay(this.state)
     const base = { token: ev.token, symbol: ev.symbol, quote: ev.quote, creator: ev.creator, block: ev.blockNumber, tx: ev.txHash, source: meta.source }
@@ -152,7 +180,8 @@ export class Sniper {
     if (meta.backfilled && meta.head != null && meta.head - ev.blockNumber > STALE_BLOCKS) {
       return log('skip', { ...base, reason: 'stale_backfill', behindBlocks: meta.head - ev.blockNumber })
     }
-    const plan = planBuy(this.cfg, ev, this.state)
+    const funds0 = this.available(ev.quote.toLowerCase())
+    const plan = planBuy(this.cfg, ev, this.state, { wallet: funds0?.balance })
     if (plan.skip) return log('skip', { ...base, reason: plan.skip, ...plan })
 
     const funds = this.available(plan.quote)
@@ -195,9 +224,10 @@ export class Sniper {
     log('buy_sent', { ...planLog, txHash: e.txHash, previewMs, sentMs })
     // book the open-price cost now (budget is about cost, not the refundable send); the receipt corrects it
     this.persist(addSpend(this.state, plan.key, plan.expectedGross, ev.creator))
-    this.confirmBuy(ev, plan, e.txHash, tax.curve)
+    const confirmed = this.confirmBuy(ev, plan, e.txHash, tax.curve)
       .catch((err) => log('buy_confirm_error', { ...base, txHash: e.txHash, error: err.message }))
-      .finally(() => { unreserve(); this.refreshFunds() })
+      .finally(async () => { unreserve(); await this.refreshFunds() })
+    if (waitForReceipt) await confirmed
   }
 
   async confirmBuy(ev, plan, hash, curve) {
